@@ -64,11 +64,43 @@ In Home Assistant:
 > via Samba share (`\\homeassistant\config\addons\`), then
 > Add-on Store → ⋮ → **Check for updates**.
 
-### 2. Install and configure
+### 2. Generate your T212 API token
+
+Trading 212 issues an **API Key ID** and an **API Secret** separately. You must combine
+them into a single Base64-encoded string before pasting it into the add-on.
+
+**Steps:**
+
+1. In the T212 app go to **Settings → API → Generate key**
+2. Copy both the **Key ID** and the **Secret** (the secret is only shown once)
+3. Run the following in PowerShell on your PC to generate the token:
+
+```powershell
+$keyId  = "paste-your-key-id-here"
+$secret = "paste-your-secret-here"
+
+$token = [Convert]::ToBase64String(
+    [System.Text.Encoding]::UTF8.GetBytes("${keyId}:${secret}")
+)
+
+Write-Output "Your t212_token value:"
+Write-Output $token
+```
+
+4. Copy the output string — that is the value to paste into `t212_token` in the add-on
+   Configuration tab. Do **not** add any `Basic` or `Bearer` prefix; the add-on adds the
+   correct `Authorization: Basic <token>` header automatically.
+
+> **Keep your Key ID and Secret safe.** Do not commit them to Git or share them.
+> If you suspect they have been exposed, regenerate the key in T212 immediately.
+> The token only needs to be stored in the HA add-on configuration (which is local
+> to your HA instance and not exposed by this project).
+
+### 3. Install and configure
 
 1. Click **Portfolio Collector → Install** (first build: 3–5 minutes)
 2. Go to the **Configuration** tab
-3. Set `t212_token` — your Trading 212 API key (T212 app → Settings → API → Generate)
+3. Paste the Base64 token generated above into `t212_token`
 4. Leave `t212_base` as `https://demo.trading212.com` until you are confident
 5. Edit the `holdings` list to match your portfolio (see [Holdings configuration](#holdings-configuration))
 6. **Save → Start**

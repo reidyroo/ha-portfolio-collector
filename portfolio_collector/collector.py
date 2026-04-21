@@ -190,7 +190,12 @@ def init_db():
 # ── Trading 212 API ───────────────────────────────────────────────────────────
 
 def _t212_headers(cfg: dict) -> dict:
-    return {"Authorization": cfg["t212_token"], "Content-Type": "application/json"}
+    token = cfg["t212_token"]
+    # Accept a raw Base64(keyId:secret) string and add the Basic prefix automatically.
+    # If the user accidentally includes the prefix themselves, don't double-add it.
+    if token and not token.lower().startswith(("basic ", "bearer ")):
+        token = f"Basic {token}"
+    return {"Authorization": token, "Content-Type": "application/json"}
 
 
 def fetch_t212_portfolio(cfg: dict) -> list:
