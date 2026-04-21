@@ -1,0 +1,319 @@
+title: Investment Monitor
+views:
+
+  # ═══════════════════════════
+  # View 1: Portfolio Overview
+  # ═══════════════════════════
+  - title: Overview
+    path: overview
+    icon: mdi:chart-line
+    type: masonry
+    cards:
+
+      # ── Header: value / return / cash / VIX ──────────────────────────────
+      - type: glance
+        title: Portfolio Summary
+        show_state: true
+        show_name: true
+        entities:
+          - entity: sensor.portfolio_value
+            name: Value (GBP)
+          - entity: sensor.portfolio_return
+            name: Total Return %
+          - entity: sensor.portfolio_cash
+            name: Free Cash
+          - entity: sensor.vix_level
+            name: VIX
+
+      # ── VIX regime ────────────────────────────────────────────────────────
+      - type: entity
+        entity: sensor.vix_regime
+        name: Market Regime
+
+      # ── Portfolio value history ───────────────────────────────────────────
+      - type: custom:apexcharts-card
+        header:
+          show: true
+          title: Portfolio Value — 90 days
+          show_states: true
+        graph_span: 90d
+        series:
+          - entity: sensor.portfolio_value
+            name: Portfolio (GBP)
+            color: "#4CAF50"
+            stroke_width: 2
+            fill_raw: zero
+            opacity: 0.15
+
+      # ── Benchmark returns since purchase ─────────────────────────────────
+      - type: glance
+        title: Returns Since Purchase (%)
+        show_state: true
+        show_name: true
+        entities:
+          - entity: sensor.portfolio_return
+            name: Portfolio
+          - entity: sensor.msci_world_return_since_purchase
+            name: MSCI World
+          - entity: sensor.sp500_return_since_purchase
+            name: S&P 500
+          - entity: sensor.ftse100_return_since_purchase
+            name: FTSE 100
+          - entity: sensor.dow_return_since_purchase
+            name: DOW
+
+      # ── Alpha vs benchmarks since purchase ───────────────────────────────
+      - type: glance
+        title: Alpha vs Benchmarks (since purchase)
+        show_state: true
+        show_name: true
+        entities:
+          - entity: sensor.portfolio_alpha_sp500
+            name: vs S&P 500
+          - entity: sensor.portfolio_alpha_msci
+            name: vs MSCI World
+
+      # ── VIX history ───────────────────────────────────────────────────────
+      - type: custom:apexcharts-card
+        header:
+          show: true
+          title: VIX — 90 days
+          show_states: true
+        graph_span: 90d
+        series:
+          - entity: sensor.vix_level
+            name: VIX
+            color: "#FF5722"
+            stroke_width: 2
+            fill_raw: zero
+            opacity: 0.1
+
+      # ── Freshness ─────────────────────────────────────────────────────────
+      - type: entity
+        entity: sensor.snapshot_age_hours
+        name: Last Snapshot Age (hours)
+
+
+  # ═══════════════════════════════
+  # View 2: Holdings & Drift
+  # ═══════════════════════════════
+  - title: Holdings
+    path: holdings
+    icon: mdi:view-list
+    type: masonry
+    cards:
+
+      # ── Holdings table ────────────────────────────────────────────────────
+      - type: markdown
+        title: Current Holdings & Drift
+        content: |
+          {% set positions = state_attr('sensor.portfolio_snapshot', 'positions') %}
+          {% if positions %}
+          | Symbol | Actual % | Target % | Drift % | P&L % | Value £ |
+          |--------|:--------:|:--------:|:-------:|:-----:|--------:|
+          {% for p in positions | sort(attribute='actual_wt', reverse=True) -%}
+          | **{{ p.symbol }}** | {{ p.actual_wt | round(1) }} | {{ p.target_wt | int }} | {{ p.drift_rel | round(1) }} | {{ p.pnl_pct | round(2) }} | {{ p.market_value | round(0) | int }} |
+          {% endfor %}
+          {% else %}
+          *No snapshot yet — trigger a collection.*
+          {% endif %}
+
+      # ── Drift table ───────────────────────────────────────────────────────
+      - type: markdown
+        title: Relative Drift per Holding (%)
+        content: |
+          {% set positions = state_attr('sensor.portfolio_snapshot', 'positions') %}
+          {% if positions %}
+          | Symbol | Drift % | |
+          |--------|--------:|:---|
+          {% for p in positions | sort(attribute='drift_rel', reverse=True) -%}
+          {%- set d = p.drift_rel | float | round(1) -%}
+          {%- set bars = [((d | abs) / 5) | round(0, 'floor') | int, 8] | min -%}
+          | **{{ p.symbol }}** | {{ "%+.1f" | format(d) }} | {% if d > 15 %}🔴 {% elif d >= 0 %}🟢 {% elif d < -15 %}🟠 {% else %}🔵 {% endif %}{{ '█' * bars }} |
+          {% endfor %}
+          *🟢 over · 🔵 under · 🔴🟠 beyond ±15% threshold · each █ ≈ 5%*
+          {% else %}
+          *No snapshot yet — trigger a collection.*
+          {% endif %}
+
+      # ── Momentum scores ───────────────────────────────────────────────────
+      - type: markdown
+        title: Momentum Scores
+        content: |
+          {% set mom = state_attr('sensor.portfolio_snapshot', 'momentum') %}
+          {% if mom %}
+          | Symbol | 12m Mom | 6m Mom | 3m Mom | Trend |
+          |--------|:-------:|:------:|:------:|:-----:|
+          {% for sym, m in mom.items() -%}
+          | **{{ sym }}** | {% if m.momentum_12m != None %}{{ m.momentum_12m | round(1) }}%{% else %}—{% endif %} | {% if m.momentum_6m != None %}{{ m.momentum_6m | round(1) }}%{% else %}—{% endif %} | {% if m.momentum_3m != None %}{{ m.momentum_3m | round(1) }}%{% else %}—{% endif %} | {{ m.trend | default('—') }} |
+          {% endfor %}
+          {% else %}
+          *Momentum data not available yet.*
+          {% endif %}
+
+
+  # ═══════════════════════════════════
+  # View 3: Rebalance & Trade Approval
+  # ═══════════════════════════════════
+  - title: Rebalance
+    path: rebalance
+    icon: mdi:scale-balance
+    type: masonry
+    cards:
+
+      - type: glance
+        title: Status
+        entities:
+          - entity: sensor.rebalance_signal
+            name: Rebalance Needed
+          - entity: sensor.vix_regime
+            name: VIX Regime
+          - entity: sensor.vix_level
+            name: VIX
+
+      - type: markdown
+        title: Rebalance Reason
+        content: |
+          {% set reason = state_attr('sensor.rebalance_signal', 'rebalance_reason') %}
+          {{ reason if reason else '*No rebalance currently suggested.*' }}
+
+      # ── Trade plan ────────────────────────────────────────────────────────
+      - type: markdown
+        title: Suggested Trade Plan
+        content: |
+          {% set actions = state_attr('sensor.rebalance_signal', 'suggested_actions') %}
+          {% if actions and actions | length > 0 %}
+          | Symbol | Action | Cur % | Base Tgt % | Adj Tgt % | Delta £ | Units | |
+          |--------|:------:|:-----:|:----------:|:---------:|--------:|------:|---|
+          {% for a in actions -%}
+          | **{{ a.symbol }}** | {{ a.action }} | {{ a.current_wt | round(1) }} | {{ a.original_target_wt }} | {{ a.target_wt | round(1) }} | {{ a.delta_value | round(0) | int }} | {{ a.delta_units }} | {% if a.balancing_trade %}⚖️{% endif %} |
+          {% endfor %}
+          *Base Tgt = integer target. Adj Tgt = momentum-tilted weight used for trade sizing. ⚖️ = balancing trade.*
+          {% else %}
+          *No trades suggested at this time.*
+          {% endif %}
+
+      # ── Controls ──────────────────────────────────────────────────────────
+      - type: entities
+        title: Controls
+        entities:
+          - entity: input_select.portfolio_phase
+            name: Portfolio Phase
+          - entity: input_number.portfolio_drift_threshold
+            name: Drift Alert Threshold
+          - entity: input_boolean.portfolio_live_mode
+            name: "⚠ Live Trading Mode"
+          - entity: input_boolean.portfolio_trade_approved
+            name: Approve Trades (toggle to execute)
+
+      - type: conditional
+        conditions:
+          - entity: input_boolean.portfolio_live_mode
+            state: "on"
+        card:
+          type: markdown
+          content: |
+            ## ⚠ Live Mode Active
+            Approving trades will submit **real orders** to Trading 212.
+            Verify the trade plan above before toggling approval.
+
+      - type: button
+        name: Run Snapshot Now
+        icon: mdi:refresh
+        tap_action:
+          action: call-service
+          service: rest_command.trigger_portfolio_collect
+          confirmation:
+            text: Trigger a portfolio snapshot collection now?
+
+      - type: button
+        name: Approve — Dry Run (no orders)
+        icon: mdi:check-outline
+        tap_action:
+          action: call-service
+          service: rest_command.approve_rebalance_dry_run
+          confirmation:
+            text: Mark rebalance as approved without placing any orders?
+
+
+  # ═══════════════════════════════════
+  # View 4: Benchmark History
+  # ═══════════════════════════════════
+  - title: Benchmarks
+    path: benchmarks
+    icon: mdi:earth
+    type: masonry
+    cards:
+
+      - type: custom:apexcharts-card
+        header:
+          show: true
+          title: Return History — 90 days (%)
+          show_states: true
+        graph_span: 90d
+        series:
+          - entity: sensor.portfolio_return
+            name: Portfolio
+            color: "#4CAF50"
+            stroke_width: 3
+          - entity: sensor.msci_world_return_1m
+            name: MSCI World
+            color: "#2196F3"
+            stroke_width: 2
+          - entity: sensor.sp500_return_1m
+            name: S&P 500
+            color: "#FF9800"
+            stroke_width: 2
+          - entity: sensor.ftse100_return_1m
+            name: FTSE 100
+            color: "#9C27B0"
+            stroke_width: 2
+          - entity: sensor.dow_return_1m
+            name: DOW
+            color: "#F44336"
+            stroke_width: 2
+
+      - type: custom:apexcharts-card
+        header:
+          show: true
+          title: Alpha History — 90 days (%)
+        graph_span: 90d
+        series:
+          - entity: sensor.portfolio_alpha_sp500
+            name: vs S&P 500
+            color: "#FF9800"
+            stroke_width: 2
+            fill_raw: zero
+            opacity: 0.15
+          - entity: sensor.portfolio_alpha_msci
+            name: vs MSCI World
+            color: "#2196F3"
+            stroke_width: 2
+            fill_raw: zero
+            opacity: 0.15
+
+      - type: glance
+        title: Returns Since Purchase (%)
+        entities:
+          - entity: sensor.msci_world_return_since_purchase
+            name: MSCI World
+          - entity: sensor.sp500_return_since_purchase
+            name: S&P 500
+          - entity: sensor.ftse100_return_since_purchase
+            name: FTSE 100
+          - entity: sensor.dow_return_since_purchase
+            name: DOW
+          - entity: sensor.vix_level
+            name: VIX
+
+      - type: glance
+        title: 3-Month Returns (%)
+        entities:
+          - entity: sensor.msci_world_return_3m
+            name: MSCI World
+          - entity: sensor.sp500_return_3m
+            name: S&P 500
+          - entity: sensor.ftse100_return_1m
+            name: FTSE 100
+          - entity: sensor.dow_return_1m
+            name: DOW

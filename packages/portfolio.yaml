@@ -1,0 +1,302 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Portfolio Monitor — HA package
+# Loaded automatically via: homeassistant: packages: !include_dir_named packages
+#
+# Collector add-on runs on port 8000 on the same machine.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── REST sensors — reads from collector add-on ───────────────────────────────
+rest:
+  - resource: http://localhost:8000/api/latest-snapshot
+    scan_interval: 300
+    timeout: 15
+    sensor:
+      - name: "Portfolio Value"
+        unique_id: portfolio_value
+        unit_of_measurement: "GBP"
+        device_class: monetary
+        value_template: "{{ value_json.portfolio_value | round(2) }}"
+        json_attributes:
+          - as_of
+          - portfolio_return_pct
+          - invested_value
+          - cash
+          - rebalance_needed
+          - rebalance_reason
+          - approved
+          - vix
+
+      - name: "Portfolio Return"
+        unique_id: portfolio_return
+        unit_of_measurement: "%"
+        value_template: "{{ value_json.portfolio_return_pct | round(2) }}"
+
+      - name: "Portfolio Cash"
+        unique_id: portfolio_cash
+        unit_of_measurement: "GBP"
+        device_class: monetary
+        value_template: "{{ value_json.cash | round(2) }}"
+
+      - name: "Rebalance Signal"
+        unique_id: rebalance_signal
+        value_template: "{{ value_json.rebalance_needed | int(0) }}"
+        json_attributes:
+          - rebalance_reason
+          - suggested_actions
+          - approved
+          - as_of
+
+      - name: "VIX Level"
+        unique_id: vix_level
+        value_template: "{{ value_json.benchmarks.vix.latest | default(0) | round(1) }}"
+
+      - name: "MSCI World Return 1M"
+        unique_id: msci_world_return_1m
+        unit_of_measurement: "%"
+        value_template: "{{ value_json.benchmarks.msci_world.return_1m | default(0) | round(2) }}"
+
+      - name: "MSCI World Return 3M"
+        unique_id: msci_world_return_3m
+        unit_of_measurement: "%"
+        value_template: "{{ value_json.benchmarks.msci_world.return_3m | default(0) | round(2) }}"
+
+      - name: "MSCI World Return Since Purchase"
+        unique_id: msci_world_return_since_purchase
+        unit_of_measurement: "%"
+        value_template: "{{ value_json.benchmarks.msci_world.return_since_purchase | default(0) | round(2) }}"
+
+      - name: "SP500 Return 1M"
+        unique_id: sp500_return_1m
+        unit_of_measurement: "%"
+        value_template: "{{ value_json.benchmarks.sp500.return_1m | default(0) | round(2) }}"
+
+      - name: "SP500 Return 3M"
+        unique_id: sp500_return_3m
+        unit_of_measurement: "%"
+        value_template: "{{ value_json.benchmarks.sp500.return_3m | default(0) | round(2) }}"
+
+      - name: "SP500 Return Since Purchase"
+        unique_id: sp500_return_since_purchase
+        unit_of_measurement: "%"
+        value_template: "{{ value_json.benchmarks.sp500.return_since_purchase | default(0) | round(2) }}"
+
+      - name: "FTSE100 Return 1M"
+        unique_id: ftse100_return_1m
+        unit_of_measurement: "%"
+        value_template: "{{ value_json.benchmarks.ftse_100.return_1m | default(0) | round(2) }}"
+
+      - name: "FTSE100 Return Since Purchase"
+        unique_id: ftse100_return_since_purchase
+        unit_of_measurement: "%"
+        value_template: "{{ value_json.benchmarks.ftse_100.return_since_purchase | default(0) | round(2) }}"
+
+      - name: "DOW Return 1M"
+        unique_id: dow_return_1m
+        unit_of_measurement: "%"
+        value_template: "{{ value_json.benchmarks.dow.return_1m | default(0) | round(2) }}"
+
+      - name: "DOW Return Since Purchase"
+        unique_id: dow_return_since_purchase
+        unit_of_measurement: "%"
+        value_template: "{{ value_json.benchmarks.dow.return_since_purchase | default(0) | round(2) }}"
+
+      - name: "Portfolio Snapshot"
+        unique_id: portfolio_snapshot
+        value_template: "{{ value_json.as_of }}"
+        json_attributes:
+          - positions
+          - momentum
+          - drift
+
+
+# ── Input booleans ───────────────────────────────────────────────────────────
+input_boolean:
+  portfolio_trade_approved:
+    name: "Approve Rebalance Trades"
+    icon: mdi:check-circle-outline
+
+  portfolio_live_mode:
+    name: "Live Trading Mode"
+    icon: mdi:alert
+    initial: false
+
+
+# ── Input selects ────────────────────────────────────────────────────────────
+input_select:
+  portfolio_phase:
+    name: "Portfolio Phase"
+    options:
+      - "Momentum-Max"
+      - "Balanced Growth"
+      - "Pre-Retirement"
+    initial: "Momentum-Max"
+    icon: mdi:tune-variant
+
+
+# ── Input numbers ────────────────────────────────────────────────────────────
+input_number:
+  portfolio_drift_threshold:
+    name: "Drift Alert Threshold %"
+    min: 5
+    max: 40
+    step: 5
+    initial: 15
+    unit_of_measurement: "%"
+    icon: mdi:percent-outline
+
+
+# ── Template sensors ─────────────────────────────────────────────────────────
+template:
+  - sensor:
+      - name: "VIX Regime"
+        unique_id: vix_regime
+        state: >
+          {% set v = states('sensor.vix_level') | float(0) %}
+          {% if v > 35 %}Extreme Fear
+          {% elif v > 25 %}High Volatility
+          {% elif v > 18 %}Elevated
+          {% else %}Low Volatility{% endif %}
+        icon: >
+          {% set v = states('sensor.vix_level') | float(0) %}
+          {% if v > 35 %}mdi:alert-circle
+          {% elif v > 25 %}mdi:alert
+          {% elif v > 18 %}mdi:alert-outline
+          {% else %}mdi:check-circle{% endif %}
+
+      - name: "Portfolio Alpha SP500"
+        unique_id: portfolio_alpha_sp500
+        unit_of_measurement: "%"
+        state: >
+          {{ ((states('sensor.portfolio_return') | float(0)) -
+              (states('sensor.sp500_return_since_purchase') | float(0))) | round(2) }}
+
+      - name: "Portfolio Alpha MSCI"
+        unique_id: portfolio_alpha_msci
+        unit_of_measurement: "%"
+        state: >
+          {{ ((states('sensor.portfolio_return') | float(0)) -
+              (states('sensor.msci_world_return_since_purchase') | float(0))) | round(2) }}
+
+      - name: "Snapshot Age Hours"
+        unique_id: snapshot_age_hours
+        unit_of_measurement: "h"
+        state: >
+          {% set ts = state_attr('sensor.portfolio_value', 'as_of') %}
+          {% if ts %}
+            {{ ((now().timestamp() - as_timestamp(ts)) / 3600) | round(1) }}
+          {% else %}
+            unknown
+          {% endif %}
+
+
+# ── REST commands ────────────────────────────────────────────────────────────
+rest_command:
+  trigger_portfolio_collect:
+    url: "http://localhost:8000/api/collect"
+    method: POST
+    content_type: "application/json"
+    timeout: 120
+
+  approve_and_execute_rebalance:
+    url: >
+      http://localhost:8000/api/approve/{{ state_attr('sensor.rebalance_signal', 'as_of')
+      }}?execute={{ (states('input_boolean.portfolio_live_mode') == 'on') | lower }}
+    method: POST
+    content_type: "application/json"
+    timeout: 60
+
+  approve_rebalance_dry_run:
+    url: >
+      http://localhost:8000/api/approve/{{ state_attr('sensor.rebalance_signal', 'as_of')
+      }}?execute=false
+    method: POST
+    content_type: "application/json"
+    timeout: 30
+
+
+# ── Automations ──────────────────────────────────────────────────────────────
+automation:
+  - id: portfolio_daily_collect
+    alias: "Portfolio: Daily snapshot after market close"
+    trigger:
+      - platform: time
+        at: "20:00:00"
+    condition:
+      - condition: time
+        weekday: [mon, tue, wed, thu, fri]
+    action:
+      - service: rest_command.trigger_portfolio_collect
+      - delay:
+          seconds: 60
+      - service: homeassistant.update_entity
+        data:
+          entity_id: sensor.portfolio_value
+
+  - id: portfolio_rebalance_notify
+    alias: "Portfolio: Notify when rebalance is suggested"
+    trigger:
+      - platform: state
+        entity_id: sensor.rebalance_signal
+        to: "1"
+    action:
+      - service: notify.persistent_notification
+        data:
+          title: "Portfolio Rebalance Suggested"
+          message: >
+            {{ state_attr('sensor.rebalance_signal', 'rebalance_reason') }}.
+            Open the Investment Monitor dashboard to review and approve.
+
+  - id: portfolio_execute_on_approval
+    alias: "Portfolio: Execute trades when approved"
+    trigger:
+      - platform: state
+        entity_id: input_boolean.portfolio_trade_approved
+        to: "on"
+    condition:
+      - condition: state
+        entity_id: sensor.rebalance_signal
+        state: "1"
+    action:
+      - service: notify.persistent_notification
+        data:
+          title: "Rebalance: Sending orders"
+          message: >
+            Live mode: {{ states('input_boolean.portfolio_live_mode') }}.
+            Submitting trade instructions to collector.
+      - service: rest_command.approve_and_execute_rebalance
+      - delay:
+          seconds: 10
+      - service: input_boolean.turn_off
+        data:
+          entity_id: input_boolean.portfolio_trade_approved
+      - service: homeassistant.update_entity
+        data:
+          entity_id: sensor.portfolio_value
+
+  - id: portfolio_high_vix_alert
+    alias: "Portfolio: High VIX warning"
+    trigger:
+      - platform: numeric_state
+        entity_id: sensor.vix_level
+        above: 25
+    action:
+      - service: notify.persistent_notification
+        data:
+          title: "VIX Alert — {{ states('sensor.vix_level') }}"
+          message: >
+            Market regime: {{ states('sensor.vix_regime') }}.
+            Momentum-based rebalancing is paused until VIX returns below 25.
+
+  - id: portfolio_collector_stale_alert
+    alias: "Portfolio: Alert if snapshot is stale"
+    trigger:
+      - platform: numeric_state
+        entity_id: sensor.snapshot_age_hours
+        above: 30
+    action:
+      - service: notify.persistent_notification
+        data:
+          title: "Portfolio: Collector may be offline"
+          message: >
+            Last snapshot was {{ states('sensor.snapshot_age_hours') }} hours ago.
+            Check the Portfolio Collector add-on is running.
