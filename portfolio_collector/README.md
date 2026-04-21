@@ -5,7 +5,7 @@ benchmarks against major indices, scores momentum, and suggests rebalance trades
 manual approval — all running locally on your HA hardware.
 
 > **Not financial advice.** This is a hobby project. Demo mode is on by default.
-> See the [full README](https://github.com/YOUR_GITHUB_USERNAME/ha-portfolio-collector)
+> See the [full README](https://github.com/reidyroo/ha-portfolio-collector)
 > for installation instructions, configuration reference, and the disclaimer.
 
 ## Quick start
@@ -15,4 +15,4 @@ manual approval — all running locally on your HA hardware.
 3. Edit the `holdings` list to match your portfolio
 4. Save → Start → trigger your first snapshot from the HA dashboard
 
-Full documentation: <https://github.com/YOUR_GITHUB_USERNAME/ha-portfolio-collector>
+Full documentation: <https://github.com/reidyroo/ha-portfolio-collector>

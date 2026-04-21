@@ -56,7 +56,7 @@ In Home Assistant:
 
 1. **Settings → Add-ons → Add-on Store**
 2. Top-right menu (⋮) → **Repositories**
-3. Paste: `https://github.com/YOUR_GITHUB_USERNAME/ha-portfolio-collector`
+3. Paste: `https://github.com/reidyroo/ha-portfolio-collector`
 4. Close — **Portfolio Collector** now appears in the store
 
 > **Local install (no GitHub):**
