@@ -154,15 +154,20 @@ def load_config() -> dict:
     if abs(total - 100.0) > 0.5:
         log.warning(f"Target weights sum to {total:.2f}% — normalising to 100%")
 
+    # Build a lookup so holdings that were saved before v1.4.0 (no "group" field)
+    # automatically inherit the correct group from DEFAULT_HOLDINGS.
+    _default_group_map = {d["yahoo_symbol"]: d["group"] for d in DEFAULT_HOLDINGS}
+
     holdings = []
     for h in holdings_raw[:20]:   # hard cap at 20
+        sym = h["yahoo_symbol"].strip()
         holdings.append({
-            "yahoo_symbol":   h["yahoo_symbol"].strip(),
+            "yahoo_symbol":   sym,
             "t212_ticker":    h["t212_ticker"].strip(),
             "target_weight":  float(h["target_weight"]) / total * 100,
             "purchase_price": float(h.get("purchase_price", 0)),
             "purchase_qty":   float(h.get("purchase_qty", 0)),
-            "group":          h.get("group", "global_beta"),
+            "group":          h.get("group") or _default_group_map.get(sym, "global_beta"),
         })
 
     # Build group_allocations (allow per-key overrides from options)

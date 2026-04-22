@@ -154,9 +154,10 @@ views:
           {% for p in positions | sort(attribute='drift_rel', reverse=True) -%}
           {%- set d = p.drift_rel | float | round(1) -%}
           {%- set bars = [((d | abs) / 5) | round(0, 'floor') | int, 8] | min -%}
-          | **{{ p.symbol }}** | {{ "%+.1f" | format(d) }} | {% if d > 15 %}🔴 {% elif d >= 0 %}🟢 {% elif d < -15 %}🟠 {% else %}🔵 {% endif %}{{ '█' * bars }} |
+          {%- set bs = namespace(s='') -%}{%- for _ in range(bars) -%}{%- set bs.s = bs.s ~ '■' -%}{%- endfor -%}
+          | **{{ p.symbol }}** | {{ "%+.1f" | format(d) }} | {% if d > 15 %}🔴 {% elif d >= 0 %}🟢 {% elif d < -15 %}🟠 {% else %}🔵 {% endif %}{{ bs.s }} |
           {% endfor %}
-          *🟢 over · 🔵 under · 🔴🟠 beyond ±15% threshold · each █ ≈ 5%*
+          *🟢 over · 🔵 under · 🔴🟠 beyond ±15% threshold · each ■ ≈ 5%*
           {% else %}
           *No snapshot yet — trigger a collection.*
           {% endif %}
