@@ -107,6 +107,7 @@ rest:
           - positions
           - momentum
           - drift
+          - group_summary
 
 
 # ── Input booleans ───────────────────────────────────────────────────────────

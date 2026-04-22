@@ -24,6 +24,7 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 import requests
 import uvicorn
@@ -38,22 +39,41 @@ log = logging.getLogger(__name__)
 DB_PATH = os.getenv("PORT_DB", "/data/portfolio.db")
 PORT    = int(os.getenv("PORT", "8000"))
 
+# ── ETF group definitions ──────────────────────────────────────────────────────
+# Group allocations define the neutral portfolio split.
+# Within each group holdings are weighted equally unless use_group_weights=false.
+GROUP_ALLOCATIONS: dict[str, float] = {
+    "momentum_core":       25.0,   # Alpha engine: IWFM, XDEM, XWEM/XMOM
+    "global_beta":         40.0,   # Broad market: VWRL, SSAC
+    "regional_satellite":  20.0,   # Regional: VUSA, IMEU, IJPN, VFEM
+    "defensive":           10.0,   # Bonds: VAGP, IGLS
+    "optional_factor":      5.0,   # Quality/MinVol: IWFQ, MVOL
+}
+
+GROUP_LABELS: dict[str, str] = {
+    "momentum_core":       "Momentum Core",
+    "global_beta":         "Global Beta",
+    "regional_satellite":  "Regional Satellite",
+    "defensive":           "Defensive",
+    "optional_factor":     "Optional Factor",
+}
+
 # ── Default holdings (used when options.json is absent / first run) ───────────
-# Format: yahoo_symbol, t212_ticker, target_weight, purchase_price, purchase_qty
+# Format: yahoo_symbol, t212_ticker, target_weight, purchase_price, purchase_qty, group
 DEFAULT_HOLDINGS = [
-    {"yahoo_symbol": "VWRL.L",  "t212_ticker": "VWRL_EQ_XLON",  "target_weight": 18.00, "purchase_price": 123.67, "purchase_qty": 7.278609},
-    {"yahoo_symbol": "IWFM.L",  "t212_ticker": "IWFM_EQ_XLON",  "target_weight": 14.01, "purchase_price":  72.41, "purchase_qty": 9.671180},
-    {"yahoo_symbol": "VAGP.L",  "t212_ticker": "VAGP_EQ_XLON",  "target_weight": 12.00, "purchase_price":  22.50, "purchase_qty": 26.666670},
-    {"yahoo_symbol": "XDEM.L",  "t212_ticker": "XDEM_EQ_XLON",  "target_weight": 10.00, "purchase_price":  60.86, "purchase_qty": 8.214227},
-    {"yahoo_symbol": "SSAC.L",  "t212_ticker": "SSAC_EQ_XLON",  "target_weight": 10.00, "purchase_price":  81.47, "purchase_qty": 6.137982},
-    {"yahoo_symbol": "VUSA.L",  "t212_ticker": "VUSA_EQ_XLON",  "target_weight":  8.00, "purchase_price":  94.25, "purchase_qty": 4.243244},
-    {"yahoo_symbol": "XWEM.DE", "t212_ticker": "XWEM_EQ_XETA",  "target_weight":  5.99, "purchase_price":  42.32, "purchase_qty": 7.079663},
-    {"yahoo_symbol": "IMEU.L",  "t212_ticker": "IMEU_EQ_XLON",  "target_weight":  6.00, "purchase_price":  32.57, "purchase_qty": 9.212345},
-    {"yahoo_symbol": "IJPN.L",  "t212_ticker": "IJPN_EQ_XLON",  "target_weight":  4.00, "purchase_price":  16.83, "purchase_qty": 11.883540},
-    {"yahoo_symbol": "VFEM.L",  "t212_ticker": "VFEM_EQ_XLON",  "target_weight":  4.00, "purchase_price":  58.03, "purchase_qty": 3.447384},
-    {"yahoo_symbol": "IGLS.L",  "t212_ticker": "IGLS_EQ_XLON",  "target_weight":  4.00, "purchase_price": 126.45, "purchase_qty": 1.581903},
-    {"yahoo_symbol": "IWFQ.L",  "t212_ticker": "IWFQ_EQ_XLON",  "target_weight":  3.00, "purchase_price":  59.67, "purchase_qty": 2.512984},
-    {"yahoo_symbol": "MVOL.L",  "t212_ticker": "MVOL_EQ_XLON",  "target_weight":  1.00, "purchase_price":  55.92, "purchase_qty": 0.892925},
+    {"yahoo_symbol": "VWRL.L",  "t212_ticker": "VWRL_EQ_XLON",  "target_weight": 18.00, "purchase_price": 123.67, "purchase_qty":  7.278609, "group": "global_beta"},
+    {"yahoo_symbol": "IWFM.L",  "t212_ticker": "IWFM_EQ_XLON",  "target_weight": 14.01, "purchase_price":  72.41, "purchase_qty":  9.671180, "group": "momentum_core"},
+    {"yahoo_symbol": "VAGP.L",  "t212_ticker": "VAGP_EQ_XLON",  "target_weight": 12.00, "purchase_price":  22.50, "purchase_qty": 26.666670, "group": "defensive"},
+    {"yahoo_symbol": "XDEM.L",  "t212_ticker": "XDEM_EQ_XLON",  "target_weight": 10.00, "purchase_price":  60.86, "purchase_qty":  8.214227, "group": "momentum_core"},
+    {"yahoo_symbol": "SSAC.L",  "t212_ticker": "SSAC_EQ_XLON",  "target_weight": 10.00, "purchase_price":  81.47, "purchase_qty":  6.137982, "group": "global_beta"},
+    {"yahoo_symbol": "VUSA.L",  "t212_ticker": "VUSA_EQ_XLON",  "target_weight":  8.00, "purchase_price":  94.25, "purchase_qty":  4.243244, "group": "regional_satellite"},
+    {"yahoo_symbol": "XWEM.DE", "t212_ticker": "XWEM_EQ_XETA",  "target_weight":  5.99, "purchase_price":  42.32, "purchase_qty":  7.079663, "group": "momentum_core"},
+    {"yahoo_symbol": "IMEU.L",  "t212_ticker": "IMEU_EQ_XLON",  "target_weight":  6.00, "purchase_price":  32.57, "purchase_qty":  9.212345, "group": "regional_satellite"},
+    {"yahoo_symbol": "IJPN.L",  "t212_ticker": "IJPN_EQ_XLON",  "target_weight":  4.00, "purchase_price":  16.83, "purchase_qty": 11.883540, "group": "regional_satellite"},
+    {"yahoo_symbol": "VFEM.L",  "t212_ticker": "VFEM_EQ_XLON",  "target_weight":  4.00, "purchase_price":  58.03, "purchase_qty":  3.447384, "group": "regional_satellite"},
+    {"yahoo_symbol": "IGLS.L",  "t212_ticker": "IGLS_EQ_XLON",  "target_weight":  4.00, "purchase_price": 126.45, "purchase_qty":  1.581903, "group": "defensive"},
+    {"yahoo_symbol": "IWFQ.L",  "t212_ticker": "IWFQ_EQ_XLON",  "target_weight":  3.00, "purchase_price":  59.67, "purchase_qty":  2.512984, "group": "optional_factor"},
+    {"yahoo_symbol": "MVOL.L",  "t212_ticker": "MVOL_EQ_XLON",  "target_weight":  1.00, "purchase_price":  55.92, "purchase_qty":  0.892925, "group": "optional_factor"},
 ]
 
 BENCHMARKS = {
@@ -64,7 +84,7 @@ BENCHMARKS = {
     "vix":        "^VIX",
 }
 
-app = FastAPI(title="Portfolio Collector", version="1.3.0")
+app = FastAPI(title="Portfolio Collector", version="1.4.0")
 
 
 # ── Options / config loader ───────────────────────────────────────────────────
@@ -79,6 +99,24 @@ def _read_options() -> dict:
         except Exception as exc:
             log.error(f"Failed to read options.json: {exc}")
     return {}
+
+
+def _group_based_weights(holdings: list, group_allocs: dict) -> dict[str, float]:
+    """
+    Derive individual target weights from group allocations.
+    Each holding within a group receives an equal share of that group's allocation.
+    Example: global_beta=40% with 2 ETFs → each gets 20%.
+    """
+    counts: dict[str, int] = {}
+    for h in holdings:
+        g = h.get("group", "global_beta")
+        counts[g] = counts.get(g, 0) + 1
+    weights = {}
+    for h in holdings:
+        g    = h.get("group", "global_beta")
+        alloc = group_allocs.get(g, 5.0)
+        weights[h["yahoo_symbol"]] = alloc / counts[g]
+    return weights
 
 
 def _round_weights_to_integers(raw: dict[str, float]) -> dict[str, int]:
@@ -124,12 +162,25 @@ def load_config() -> dict:
             "target_weight":  float(h["target_weight"]) / total * 100,
             "purchase_price": float(h.get("purchase_price", 0)),
             "purchase_qty":   float(h.get("purchase_qty", 0)),
+            "group":          h.get("group", "global_beta"),
         })
+
+    # Build group_allocations (allow per-key overrides from options)
+    group_allocs = {
+        k: float(opts.get("group_allocations", {}).get(k, v))
+        for k, v in GROUP_ALLOCATIONS.items()
+    }
+
+    cfg_use_group_weights = bool(opts.get("use_group_weights", False))
 
     # Round target weights to whole numbers (largest-remainder method keeps sum = 100).
     # Drift and rebalance logic is then relative to clean integer targets, so
     # sub-1% positional noise never triggers unnecessary trades.
     fractional_weights = {h["yahoo_symbol"]: h["target_weight"] for h in holdings}
+
+    if cfg_use_group_weights:
+        fractional_weights = _group_based_weights(holdings, group_allocs)
+
     rounded_weights    = _round_weights_to_integers(fractional_weights)
     log.debug(f"Rounded target weights: {rounded_weights}")
 
@@ -141,6 +192,10 @@ def load_config() -> dict:
         "vix_high_threshold":          float(opts.get("vix_high_threshold",           25)),
         "vix_extreme_threshold":       float(opts.get("vix_extreme_threshold",        35)),
         "min_days_between_rebalance":  int(opts.get("min_days_between_rebalance",    21)),
+        "use_group_weights":           cfg_use_group_weights,
+        "max_cvar_pct":                float(opts.get("max_cvar_pct", 5.0)),
+        "cost_rate_pct":               float(opts.get("cost_rate_pct", 0.1)),
+        "group_allocations":           group_allocs,
         "holdings":                    holdings,
         # target_weights are whole-number ints — no fractional drift noise
         "target_weights":    rounded_weights,
@@ -148,6 +203,7 @@ def load_config() -> dict:
         "t212_to_yahoo":     {h["t212_ticker"]:  h["yahoo_symbol"]   for h in holdings},
         "purchase_prices":   {h["yahoo_symbol"]: h["purchase_price"] for h in holdings},
         "purchase_qtys":     {h["yahoo_symbol"]: h["purchase_qty"]   for h in holdings},
+        "symbol_groups":     {h["yahoo_symbol"]: h.get("group", "global_beta") for h in holdings},
     }
 
 
@@ -394,6 +450,47 @@ def _rs_vs_world(holding: pd.Series, world: pd.Series, bars: int = 63) -> Option
     return round(float(h.iloc[-1] / h.iloc[-bars] - 1) * 100 - float(b.iloc[-1] / b.iloc[-bars] - 1) * 100, 2)
 
 
+def _wma_trend_score(price_series: pd.Series, lookback: int = 126) -> float:
+    """
+    Linearly-weighted moving average of returns divided by volatility.
+    Gives a dimensionless trend signal: positive = uptrend, negative = downtrend.
+    Lookback of 126 bars ≈ 6 months (optimal for momentum persistence).
+    """
+    s = price_series.dropna()
+    if len(s) < lookback + 2:
+        return 0.0
+    rets = s.pct_change().dropna().iloc[-lookback:]
+    if len(rets) < 10:
+        return 0.0
+    vol = float(rets.std())
+    if vol <= 0:
+        return 0.0
+    weights = np.linspace(1.0, 2.0, len(rets))
+    weights /= weights.sum()
+    return round(float(np.dot(rets.values, weights)) / vol, 4)
+
+
+def _portfolio_cvar(weights_pct: dict, hist_df: pd.DataFrame, alpha: float = 0.95) -> float:
+    """
+    Historical CVaR (Expected Shortfall) at alpha confidence level.
+    weights_pct: {symbol: float_%} — need not sum to 100.
+    Returns the expected daily loss in the worst (1-alpha)% of trading days.
+    A value of 0.02 means the portfolio loses ≥2% on its worst days on average.
+    """
+    syms = [s for s in weights_pct if s in hist_df.columns and weights_pct.get(s, 0) > 0]
+    if not syms:
+        return 0.0
+    rets = hist_df[syms].pct_change().dropna()
+    if len(rets) < 30:
+        return 0.0
+    w = np.array([weights_pct[s] for s in syms], dtype=float)
+    w /= w.sum()
+    port_rets = rets[syms].values @ w
+    cutoff = max(int((1.0 - alpha) * len(port_rets)), 1)
+    tail = np.sort(port_rets)[:cutoff]
+    return round(float(-tail.mean()), 6)
+
+
 # ── Core snapshot ─────────────────────────────────────────────────────────────
 
 def compute_snapshot() -> dict:
@@ -460,6 +557,7 @@ def compute_snapshot() -> dict:
             "market_value":  round(market_value, 2),
             "cost_basis":    round(cost_basis, 2),
             "pnl_pct":       round(pnl_pct, 2),
+            "group":         cfg["symbol_groups"].get(sym, "global_beta"),
             "target_wt":     round(target_wt, 2),
         })
 
@@ -477,6 +575,19 @@ def compute_snapshot() -> dict:
     max_drift_rel = max(abs(p["drift_rel"]) for p in positions) if positions else 0.0
     total_cost    = sum(p["cost_basis"] for p in positions)
     portfolio_return_pct = (total_value - total_cost) / total_cost * 100 if total_cost else 0.0
+
+    # Group allocation summary
+    group_summary: dict[str, dict] = {}
+    for p in positions:
+        g = p.get("group", "global_beta")
+        if g not in group_summary:
+            group_summary[g] = {
+                "label":     GROUP_LABELS.get(g, g),
+                "actual_wt": 0.0,
+                "target_wt": 0.0,
+            }
+        group_summary[g]["actual_wt"] = round(group_summary[g]["actual_wt"] + p["actual_wt"], 2)
+        group_summary[g]["target_wt"] = round(group_summary[g]["target_wt"] + p["target_wt"], 2)
 
     # Benchmarks
     benchmarks    = {}
@@ -512,24 +623,32 @@ def compute_snapshot() -> dict:
         s  = hist[sym].dropna()
         rs = _rs_vs_world(s, world_series, 63) if world_series is not None else None
         momentum[sym] = {
-            "momentum_12m": round(v, 2) if (v := _momentum(s, 252)) is not None else None,
-            "momentum_6m":  round(v, 2) if (v := _momentum(s, 126)) is not None else None,
-            "momentum_3m":  round(v, 2) if (v := _momentum(s, 63, 0)) is not None else None,
-            "trend":        _ema_trend(s),
-            "return_1m":    round(_period_return(s, 21) or 0.0, 2),
-            "return_3m":    round(_period_return(s, 63) or 0.0, 2),
+            "momentum_12m":  round(v, 2) if (v := _momentum(s, 252))    is not None else None,
+            "momentum_9m":   round(v, 2) if (v := _momentum(s, 189))    is not None else None,
+            "momentum_6m":   round(v, 2) if (v := _momentum(s, 126))    is not None else None,
+            "momentum_3m":   round(v, 2) if (v := _momentum(s, 63, 0))  is not None else None,
+            "trend":         _ema_trend(s),
+            "trend_score":   _wma_trend_score(s, 126),   # WMA signal for weight tilting
+            "return_1m":     round(_period_return(s, 21) or 0.0, 2),
+            "return_3m":     round(_period_return(s, 63) or 0.0, 2),
             "rs_vs_world_3m": rs,
+            "group":         cfg["symbol_groups"].get(sym, "global_beta"),
         }
 
-    mom_scores = {
-        sym: round(sum(v for v in [m.get("momentum_12m"), m.get("momentum_6m"), m.get("momentum_3m")] if v is not None) /
-                   max(1, len([v for v in [m.get("momentum_12m"), m.get("momentum_6m"), m.get("momentum_3m")] if v is not None])), 2)
-        if m else 0.0
-        for sym, m in momentum.items()
-    }
+    # Blended score: 50% WMA trend (scaled to % range), 30% 6m momentum, 20% 12m momentum.
+    # WMA trend score is dimensionless (~±0.05); multiply by 100 to match % momentum scale.
+    mom_scores: dict[str, float] = {}
+    for sym, m in momentum.items():
+        if not m:
+            mom_scores[sym] = 0.0
+            continue
+        trend = (m.get("trend_score") or 0.0) * 100
+        m6    =  m.get("momentum_6m")  or 0.0
+        m12   =  m.get("momentum_12m") or 0.0
+        mom_scores[sym] = round(trend * 0.5 + m6 * 0.3 + m12 * 0.2, 2)
 
     rebalance_needed, rebalance_reason, suggested_actions = _compute_rebalance(
-        cfg, positions, mom_scores, vix, total_value, max_drift_rel
+        cfg, positions, mom_scores, momentum, vix, total_value, max_drift_rel, hist
     )
 
     as_of = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -567,10 +686,11 @@ def compute_snapshot() -> dict:
         "positions": positions, "benchmarks": benchmarks, "momentum": momentum,
         "rebalance_needed": rebalance_needed, "rebalance_reason": rebalance_reason,
         "suggested_actions": suggested_actions, "vix": vix, "approved": False,
+        "group_summary": group_summary,
     }
 
 
-def _compute_rebalance(cfg, positions, mom_scores, vix, total_value, max_drift_rel):
+def _compute_rebalance(cfg, positions, mom_scores, momentum, vix, total_value, max_drift_rel, hist=None):
     vix_high      = cfg["vix_high_threshold"]
     vix_extreme   = cfg["vix_extreme_threshold"]
     cooldown_days = cfg["min_days_between_rebalance"]
@@ -614,6 +734,21 @@ def _compute_rebalance(cfg, positions, mom_scores, vix, total_value, max_drift_r
 
     adj_weights = _momentum_adjusted_weights(cfg["target_weights"], mom_scores, vix, vix_high)
 
+    # ── CVaR constraint ───────────────────────────────────────────────────────
+    # If portfolio tail risk exceeds the configured limit, scale back non-defensive
+    # holdings and redistribute weight to defensive ETFs.
+    max_cvar = cfg.get("max_cvar_pct", 5.0) / 100.0
+    if hist is not None and not hist.empty and max_cvar > 0:
+        cvar = _portfolio_cvar(adj_weights, hist)
+        if cvar > max_cvar:
+            defensive_syms = {sym for sym, g in cfg["symbol_groups"].items() if g == "defensive"}
+            scale = max_cvar / cvar
+            scaled = {sym: (w if sym in defensive_syms else w * scale)
+                      for sym, w in adj_weights.items()}
+            total_s = sum(scaled.values())
+            adj_weights = {sym: v / total_s * 100 for sym, v in scaled.items()}
+            log.info(f"CVaR={cvar:.4f} > limit={max_cvar:.4f} — defensive tilt applied")
+
     traded_syms = set()
 
     def _make_action(p, delta_val, balancing=False):
@@ -637,12 +772,19 @@ def _compute_rebalance(cfg, positions, mom_scores, vix, total_value, max_drift_r
 
     actions = []
     # Primary trades: holdings that have crossed an integer boundary
+    cost_rate = cfg.get("cost_rate_pct", 0.1) / 100.0
     for p in positions:
         if _int_gap(p) < min_gap:
             continue
         sym       = p["symbol"]
         delta_val = total_value * adj_weights[sym] / 100 - p["market_value"]
         if abs(delta_val) < 10.0:
+            continue
+        # Transaction cost filter: skip trades where benefit ≤ cost
+        trade_cost       = abs(delta_val) * cost_rate
+        expected_benefit = abs(delta_val) * abs(p["drift_rel"]) / 100.0
+        if expected_benefit <= trade_cost:
+            log.debug(f"{sym}: cost filter — benefit £{expected_benefit:.2f} ≤ cost £{trade_cost:.2f}")
             continue
         actions.append(_make_action(p, delta_val))
         traded_syms.add(sym)
@@ -701,7 +843,7 @@ def health():
         "t212_base":   cfg.get("t212_base", "https://demo.trading212.com"),
         "demo_mode":   "demo" in cfg.get("t212_base", "demo"),
         "holdings":    len(cfg.get("holdings", DEFAULT_HOLDINGS)),
-        "version":     "1.3.0",
+        "version":     "1.4.0",
     }
 
 
@@ -775,6 +917,16 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     for f in ["positions_json", "benchmarks_json", "drift_json", "momentum_json", "suggested_actions"]:
         key = f.replace("_json", "")
         d[key] = json.loads(d.pop(f) or ("[]" if f == "suggested_actions" else "{}"))
+    # Derive group_summary from positions (avoids DB schema change)
+    if "positions" in d and isinstance(d["positions"], list):
+        gs: dict = {}
+        for p in d["positions"]:
+            g = p.get("group", "global_beta")
+            if g not in gs:
+                gs[g] = {"label": GROUP_LABELS.get(g, g), "actual_wt": 0.0, "target_wt": 0.0}
+            gs[g]["actual_wt"] = round(gs[g]["actual_wt"] + p.get("actual_wt", 0.0), 2)
+            gs[g]["target_wt"] = round(gs[g]["target_wt"] + p.get("target_wt", 0.0), 2)
+        d["group_summary"] = gs
     return d
 
 
@@ -783,6 +935,6 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
 if __name__ == "__main__":
     init_db()
     cfg = load_config()
-    log.info(f"Portfolio Collector v1.3.0 — {len(cfg['target_weights'])} holdings — "
+    log.info(f"Portfolio Collector v1.4.0 — {len(cfg['target_weights'])} holdings — "
              f"DB: {DB_PATH} — T212: {cfg['t212_base']}")
     uvicorn.run(app, host="0.0.0.0", port=PORT)
