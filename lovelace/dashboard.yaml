@@ -128,16 +128,13 @@ views:
         content: |
           {% set positions = state_attr('sensor.portfolio_snapshot', 'positions') %}
           {% if positions %}
+          {% set ns = namespace(rows='') %}
+          {% set go = ['momentum_core','global_beta','regional_satellite','defensive','optional_factor'] %}
+          {% for gkey in go %}{% for p in positions | sort(attribute='actual_wt', reverse=True) %}{% if p.group == gkey %}{% set ns.rows = ns.rows ~ '| ' ~ (p.group | replace('_',' ') | title) ~ ' | **' ~ p.symbol ~ '** | ' ~ (p.actual_wt | round(1)) ~ ' | ' ~ (p.target_wt | int) ~ ' | ' ~ (p.drift_rel | round(1)) ~ ' | ' ~ (p.pnl_pct | round(2)) ~ ' | ' ~ (p.market_value | round(0) | int) ~ ' |
+' %}{% endif %}{% endfor %}{% endfor %}
           | Group | Symbol | Actual % | Target % | Drift % | P&L % | Value £ |
           |-------|--------|:--------:|:--------:|:-------:|:-----:|--------:|
-          {% set group_order = ['momentum_core','global_beta','regional_satellite','defensive','optional_factor'] %}
-          {% for gkey in group_order %}
-          {% for p in positions | sort(attribute='actual_wt', reverse=True) %}
-          {% if p.group == gkey %}
-          | {{ p.group | replace('_',' ') | title }} | **{{ p.symbol }}** | {{ p.actual_wt | round(1) }} | {{ p.target_wt | int }} | {{ p.drift_rel | round(1) }} | {{ p.pnl_pct | round(2) }} | {{ p.market_value | round(0) | int }} |
-          {% endif %}
-          {% endfor %}
-          {% endfor %}
+{{ ns.rows }}
           {% else %}
           *No snapshot yet — trigger a collection.*
           {% endif %}
