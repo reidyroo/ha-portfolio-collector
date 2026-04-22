@@ -132,12 +132,11 @@ views:
           |-------|--------|:--------:|:--------:|:-------:|:-----:|--------:|
           {% set group_order = ['momentum_core','global_beta','regional_satellite','defensive','optional_factor'] %}
           {% for gkey in group_order %}
-          {%- set grp_positions = positions | selectattr('group','eq',gkey) | list %}
-          {%- if grp_positions | length > 0 %}
-          {% for p in grp_positions | sort(attribute='actual_wt', reverse=True) -%}
-          | {{ loop.first | ternary('**' ~ (p.group | replace('_',' ') | title) ~ '**','') }} | **{{ p.symbol }}** | {{ p.actual_wt | round(1) }} | {{ p.target_wt | int }} | {{ p.drift_rel | round(1) }} | {{ p.pnl_pct | round(2) }} | {{ p.market_value | round(0) | int }} |
-          {% endfor %}
+          {% for p in positions | sort(attribute='actual_wt', reverse=True) %}
+          {% if p.group == gkey %}
+          | {{ p.group | replace('_',' ') | title }} | **{{ p.symbol }}** | {{ p.actual_wt | round(1) }} | {{ p.target_wt | int }} | {{ p.drift_rel | round(1) }} | {{ p.pnl_pct | round(2) }} | {{ p.market_value | round(0) | int }} |
           {% endif %}
+          {% endfor %}
           {% endfor %}
           {% else %}
           *No snapshot yet — trigger a collection.*
