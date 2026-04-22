@@ -4,6 +4,51 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [1.4.0] — 2026-04-22
+
+### Added
+- **ETF group definitions** — holdings are tagged with one of five groups:
+  `momentum_core`, `global_beta`, `regional_satellite`, `defensive`,
+  `optional_factor`. Group allocations and labels are defined as module-level
+  constants (`GROUP_ALLOCATIONS`, `GROUP_LABELS`).
+- **Group-based weight derivation** — new `use_group_weights` option (default
+  `false`). When enabled, individual target weights are derived from group
+  allocations (equal split within each group) instead of per-holding
+  `target_weight` values.
+- **`group_summary` in snapshot** — every snapshot now includes a per-group
+  summary of actual vs target allocation. Derived fresh from positions in
+  `_row_to_dict` (no DB schema change required).
+- **WMA trend score** (`trend_score`) — linearly-weighted moving-average
+  momentum signal (dimensionless, 126-bar lookback) added to every holding's
+  momentum dict.
+- **9-month momentum** (`momentum_9m`) added alongside 12m, 6m, 3m.
+- **Blended momentum score** — `mom_scores` now uses 50% WMA trend signal +
+  30% 6m momentum + 20% 12m momentum instead of a simple average.
+- **CVaR constraint** (`max_cvar_pct`, default 5%) — if portfolio historical
+  tail risk exceeds the limit, non-defensive holdings are scaled back and
+  weight redistributed to defensive ETFs before trade sizing.
+- **Transaction cost filter** (`cost_rate_pct`, default 0.1%) — primary trades
+  are skipped when the expected drift-correction benefit ≤ the estimated
+  round-trip cost.
+- **`numpy` import** added; required by `_wma_trend_score` and
+  `_portfolio_cvar`.
+- **Dashboard: Group allocation card** — new markdown card in the Holdings view
+  shows group-level target vs actual weights with colour-coded delta.
+- **Dashboard: Holdings table grouped** — rows are now grouped by
+  `group_order` and show the group label in the first column.
+- **Dashboard: Momentum table** — new `9m` and `Signal` (WMA trend) columns.
+
+### Changed
+- `_compute_rebalance` signature extended with `momentum` and `hist`
+  parameters (both backwards-compatible with defaults).
+- `load_config` returns four new keys: `use_group_weights`, `max_cvar_pct`,
+  `cost_rate_pct`, `group_allocations`, `symbol_groups`.
+- `sensor.portfolio_snapshot` `json_attributes` now includes `group_summary`.
+- `config.yaml` schema updated with `use_group_weights`, `max_cvar_pct`,
+  `cost_rate_pct`, and optional `group` field on each holding.
+
+---
+
 ## [1.3.0] — 2026-04-21
 
 ### Changed
