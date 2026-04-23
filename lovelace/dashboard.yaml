@@ -100,7 +100,7 @@ views:
   - title: Holdings
     path: holdings
     icon: mdi:view-list
-    type: masonry
+    type: panel
     cards:
 
       # ── 2×2 grid: all four holding cards ─────────────────────────────────
