@@ -734,19 +734,19 @@ def _compute_rebalance(cfg, positions, mom_scores, momentum, vix, total_value, m
     def _int_gap(p):
         return abs(round(p["actual_wt"]) - int(p["target_wt"]))
 
-    # Require ≥2 integer points in normal markets; ≥3 when VIX is elevated.
-    # A single rounding tick (e.g. 18%→19%) is noise — wait for genuine drift.
+    # Require ≥1 integer point in normal markets; ≥2 when VIX is elevated.
+    # Trades whenever the rounded actual weight differs from the integer target.
     if vix > vix_high:
-        min_gap = 3
+        min_gap = 2
         drifted = [p for p in positions if _int_gap(p) >= min_gap]
         if not drifted:
-            return False, f"VIX={vix:.1f} elevated — no holding is ≥3 pts off target, holding", []
+            return False, f"VIX={vix:.1f} elevated — no holding is ≥2 pts off target, holding", []
     else:
-        min_gap = 2
+        min_gap = 1
         drifted = [p for p in positions if _int_gap(p) >= min_gap]
 
     if not drifted:
-        return False, "No holding is ≥2 integer points from target — no trade needed", []
+        return False, "No holding is ≥1 integer point from target — no trade needed", []
 
     adj_weights = _momentum_adjusted_weights(cfg["target_weights"], mom_scores, vix, vix_high)
 
@@ -829,7 +829,8 @@ def _compute_rebalance(cfg, positions, mom_scores, momentum, vix, total_value, m
         for p in drifted
     )
     reason = (f"{len(drifted)} holding(s) crossed integer target: {drifted_summary}"
-              + (f"; VIX elevated ({vix:.1f}) — ≥2pt gap required" if vix > vix_high else ""))
+              + (f"; VIX elevated ({vix:.1f}) — ≥2pt gap required" if vix > vix_high else "")
+              )
     return True, reason, actions
 
 
