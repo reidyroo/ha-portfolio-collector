@@ -100,81 +100,84 @@ views:
   - title: Holdings
     path: holdings
     icon: mdi:view-list
-    type: masonry
+    type: panel
     cards:
 
-      # ── Group allocation summary ──────────────────────────────────────────
-      - type: markdown
-        title: Allocation by Group
-        content: |
-          {% set snap = state_attr('sensor.portfolio_snapshot', 'group_summary') %}
-          {% set pos  = state_attr('sensor.portfolio_snapshot', 'positions') %}
-          {% if snap %}
-          | Group | Target % | Actual % | Δ |
-          |-------|:--------:|:--------:|:---:|
-          {% for gkey, g in snap.items() -%}
-          {%- set delta = (g.actual_wt - g.target_wt) | round(1) -%}
-          | **{{ g.label }}** | {{ g.target_wt | int }} | {{ g.actual_wt | round(1) }} | {% if delta > 2 %}🔴 +{{ delta }}{% elif delta < -2 %}🟠 {{ delta }}{% else %}🟢 {{ delta }}{% endif %} |
-          {% endfor %}
-          {% elif pos %}
-          *Group summary not yet in snapshot — trigger a new collection.*
-          {% else %}
-          *No snapshot yet.*
-          {% endif %}
+      # ── 2×2 grid: all four holding cards ─────────────────────────────────
+      - type: grid
+        columns: 2
+        square: false
+        cards:
 
-      # ── Holdings table ────────────────────────────────────────────────────
-      - type: markdown
-        title: Current Holdings & Drift
-        content: |
-          {% set positions = state_attr('sensor.portfolio_snapshot', 'positions') %}
-          {% if positions %}
-          | Group | Symbol | Actual % | Target % | Drift % | P&L % | Value £ |
-          |-------|--------|:--------:|:--------:|:-------:|:-----:|--------:|
-          {% set group_order = ['momentum_core','global_beta','regional_satellite','defensive','optional_factor'] %}
-          {% for gkey in group_order %}
-          {%- set grp_positions = positions | selectattr('group','eq',gkey) | list %}
-          {%- if grp_positions | length > 0 %}
-          {% for p in grp_positions | sort(attribute='actual_wt', reverse=True) -%}
-          | {{ loop.first | ternary('**' ~ (p.group | replace('_',' ') | title) ~ '**','') }} | **{{ p.symbol }}** | {{ p.actual_wt | round(1) }} | {{ p.target_wt | int }} | {{ p.drift_rel | round(1) }} | {{ p.pnl_pct | round(2) }} | {{ p.market_value | round(0) | int }} |
-          {% endfor %}
-          {% endif %}
-          {% endfor %}
-          {% else %}
-          *No snapshot yet — trigger a collection.*
-          {% endif %}
+          # ── Group allocation summary ──────────────────────────────────────
+          - type: markdown
+            title: Allocation by Group
+            content: |
+              {% set snap = state_attr('sensor.portfolio_snapshot', 'group_summary') %}
+              {% if snap %}
+              | Group | Target % | Actual % | Δ |
+              |-------|:--------:|:--------:|:---:|
+              {% for gkey in ['momentum_core','global_beta','regional_satellite','defensive','optional_factor'] -%}
+              {%- if gkey in snap -%}
+              {%- set g = snap[gkey] -%}
+              {%- set delta = (g.actual_wt - g.target_wt) | round(1) -%}
+              | **{{ g.label }}** | {{ g.target_wt | int }} | {{ g.actual_wt | round(1) }} | {% if delta > 2 %}🔴 +{{ delta }}{% elif delta < -2 %}🟠 {{ delta }}{% else %}🟢 {{ delta }}{% endif %} |
+              {% endif -%}
+              {%- endfor %}
+              {% else %}
+              *No snapshot yet — trigger a collection.*
+              {% endif %}
 
-      # ── Drift table ───────────────────────────────────────────────────────
-      - type: markdown
-        title: Relative Drift per Holding (%)
-        content: |
-          {% set positions = state_attr('sensor.portfolio_snapshot', 'positions') %}
-          {% if positions %}
-          | Symbol | Drift % | |
-          |--------|--------:|:---|
-          {% for p in positions | sort(attribute='drift_rel', reverse=True) -%}
-          {%- set d = p.drift_rel | float | round(1) -%}
-          {%- set bars = [((d | abs) / 5) | round(0, 'floor') | int, 8] | min -%}
-          | **{{ p.symbol }}** | {{ "%+.1f" | format(d) }} | {% if d > 15 %}🔴 {% elif d >= 0 %}🟢 {% elif d < -15 %}🟠 {% else %}🔵 {% endif %}{{ '█' * bars }} |
-          {% endfor %}
-          *🟢 over · 🔵 under · 🔴🟠 beyond ±15% threshold · each █ ≈ 5%*
-          {% else %}
-          *No snapshot yet — trigger a collection.*
-          {% endif %}
+          # ── Holdings table ────────────────────────────────────────────────
+          - type: markdown
+            title: Current Holdings & Drift
+            content: |
+              {% set positions = state_attr('sensor.portfolio_snapshot', 'positions') %}
+              {% if positions %}
+              | Group | Symbol | Actual % | Target % | Drift % | P&L % | Value £ |
+              |-------|--------|:--------:|:--------:|:-------:|:-----:|--------:|
+              {% for p in positions | sort(attribute='actual_wt', reverse=True) | sort(attribute='group_order') -%}
+              | {{ p.group | replace('_',' ') | title }} | **{{ p.symbol }}** | {{ p.actual_wt | round(1) }} | {{ p.target_wt | int }} | {{ p.drift_rel | round(1) }} | {{ p.pnl_pct | round(2) }} | {{ p.market_value | round(0) | int }} |
+              {% endfor %}
+              {% else %}
+              *No snapshot yet — trigger a collection.*
+              {% endif %}
 
-      # ── Momentum scores ───────────────────────────────────────────────────
-      - type: markdown
-        title: Momentum Scores
-        content: |
-          {% set mom = state_attr('sensor.portfolio_snapshot', 'momentum') %}
-          {% if mom %}
-          | Symbol | 12m | 9m | 6m | 3m | Trend | Signal |
-          |--------|:---:|:--:|:--:|:--:|:-----:|:------:|
-          {% for sym, m in mom.items() -%}
-          | **{{ sym }}** | {% if m.momentum_12m != None %}{{ m.momentum_12m | round(1) }}%{% else %}—{% endif %} | {% if m.momentum_9m != None %}{{ m.momentum_9m | round(1) }}%{% else %}—{% endif %} | {% if m.momentum_6m != None %}{{ m.momentum_6m | round(1) }}%{% else %}—{% endif %} | {% if m.momentum_3m != None %}{{ m.momentum_3m | round(1) }}%{% else %}—{% endif %} | {{ m.trend | default('—') }} | {% if m.trend_score is defined %}{% set ts = m.trend_score | float %}{% if ts > 0.02 %}📈{% elif ts < -0.02 %}📉{% else %}➡️{% endif %} {{ ts | round(3) }}{% else %}—{% endif %} |
-          {% endfor %}
-          {% else %}
-          *Momentum data not available yet.*
-          {% endif %}
+          # ── Drift table ───────────────────────────────────────────────────
+          - type: markdown
+            title: Relative Drift per Holding (%)
+            content: |
+              {% set positions = state_attr('sensor.portfolio_snapshot', 'positions') %}
+              {% if positions %}
+              | Symbol | Drift % | |
+              |--------|--------:|:---|
+              {% for p in positions | sort(attribute='actual_wt', reverse=True) | sort(attribute='group_order') -%}
+              {%- set d = p.drift_rel | float | round(1) -%}
+              {%- set bars = [((d | abs) / 5) | round(0, 'floor') | int, 8] | min -%}
+              {%- set bs = namespace(s='') -%}{%- for _ in range(bars) -%}{%- set bs.s = bs.s ~ '■' -%}{%- endfor -%}
+              | **{{ p.symbol }}** | {{ "%+.1f" | format(d) }} | {% if d > 15 %}🔴 {% elif d >= 0 %}🟢 {% elif d < -15 %}🟠 {% else %}🔵 {% endif %}{{ bs.s }} |
+              {% endfor %}
+              *🟢 over · 🔵 under · 🔴🟠 beyond ±15% threshold · each ■ ≈ 5%*
+              {% else %}
+              *No snapshot yet — trigger a collection.*
+              {% endif %}
+
+          # ── Momentum scores ───────────────────────────────────────────────
+          - type: markdown
+            title: Momentum Scores
+            content: |
+              {% set positions = state_attr('sensor.portfolio_snapshot', 'positions') %}
+              {% set mom = state_attr('sensor.portfolio_snapshot', 'momentum') %}
+              {% if mom and positions %}
+              | Symbol | 12m | 9m | 6m | 3m | Trend | Signal |
+              |--------|:---:|:--:|:--:|:--:|:-----:|:------:|
+              {% for p in positions | sort(attribute='actual_wt', reverse=True) | sort(attribute='group_order') -%}
+              {%- set m = mom[p.symbol] if p.symbol in mom else {} -%}
+              | **{{ p.symbol }}** | {% if m.momentum_12m is defined and m.momentum_12m != None %}{{ m.momentum_12m | round(1) }}%{% else %}—{% endif %} | {% if m.momentum_9m is defined and m.momentum_9m != None %}{{ m.momentum_9m | round(1) }}%{% else %}—{% endif %} | {% if m.momentum_6m is defined and m.momentum_6m != None %}{{ m.momentum_6m | round(1) }}%{% else %}—{% endif %} | {% if m.momentum_3m is defined and m.momentum_3m != None %}{{ m.momentum_3m | round(1) }}%{% else %}—{% endif %} | {{ m.trend | default('—') }} | {% if m.trend_score is defined and m.trend_score != None %}{% set ts = m.trend_score | float %}{% if ts > 0.02 %}📈{% elif ts < -0.02 %}📉{% else %}➡️{% endif %} {{ ts | round(3) }}{% else %}—{% endif %} |
+              {% endfor %}
+              {% else %}
+              *Momentum data not available yet.*
+              {% endif %}
 
 
   # ═══════════════════════════════════

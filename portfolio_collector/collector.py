@@ -58,6 +58,15 @@ GROUP_LABELS: dict[str, str] = {
     "optional_factor":     "Optional Factor",
 }
 
+# Display order (0 = first). Used as a sort key in templates and the DB.
+GROUP_ORDER: dict[str, int] = {
+    "momentum_core":      0,
+    "global_beta":        1,
+    "regional_satellite": 2,
+    "defensive":          3,
+    "optional_factor":    4,
+}
+
 # ── Default holdings (used when options.json is absent / first run) ───────────
 # Format: yahoo_symbol, t212_ticker, target_weight, purchase_price, purchase_qty, group
 DEFAULT_HOLDINGS = [
@@ -154,15 +163,20 @@ def load_config() -> dict:
     if abs(total - 100.0) > 0.5:
         log.warning(f"Target weights sum to {total:.2f}% — normalising to 100%")
 
+    # Build a lookup so holdings that were saved before v1.4.0 (no "group" field)
+    # automatically inherit the correct group from DEFAULT_HOLDINGS.
+    _default_group_map = {d["yahoo_symbol"]: d["group"] for d in DEFAULT_HOLDINGS}
+
     holdings = []
     for h in holdings_raw[:20]:   # hard cap at 20
+        sym = h["yahoo_symbol"].strip()
         holdings.append({
-            "yahoo_symbol":   h["yahoo_symbol"].strip(),
+            "yahoo_symbol":   sym,
             "t212_ticker":    h["t212_ticker"].strip(),
             "target_weight":  float(h["target_weight"]) / total * 100,
             "purchase_price": float(h.get("purchase_price", 0)),
             "purchase_qty":   float(h.get("purchase_qty", 0)),
-            "group":          h.get("group", "global_beta"),
+            "group":          h.get("group") or _default_group_map.get(sym, "global_beta"),
         })
 
     # Build group_allocations (allow per-key overrides from options)
@@ -558,6 +572,7 @@ def compute_snapshot() -> dict:
             "cost_basis":    round(cost_basis, 2),
             "pnl_pct":       round(pnl_pct, 2),
             "group":         cfg["symbol_groups"].get(sym, "global_beta"),
+            "group_order":   GROUP_ORDER.get(cfg["symbol_groups"].get(sym, "global_beta"), 9),
             "target_wt":     round(target_wt, 2),
         })
 
@@ -633,6 +648,7 @@ def compute_snapshot() -> dict:
             "return_3m":     round(_period_return(s, 63) or 0.0, 2),
             "rs_vs_world_3m": rs,
             "group":         cfg["symbol_groups"].get(sym, "global_beta"),
+            "group_order":   GROUP_ORDER.get(cfg["symbol_groups"].get(sym, "global_beta"), 9),
         }
 
     # Blended score: 50% WMA trend (scaled to % range), 30% 6m momentum, 20% 12m momentum.
