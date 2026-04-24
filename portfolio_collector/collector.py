@@ -943,6 +943,18 @@ def benchmark_history(days: int = 90):
     return [{"as_of": r["as_of"], "benchmarks": json.loads(r["benchmarks_json"] or "{}")} for r in rows]
 
 
+@app.post("/api/reset-cooldown")
+def reset_cooldown():
+    """Clear the executed flag on all snapshots so the rebalance cooldown resets.
+    Use after a failed execution to allow an immediate retry."""
+    conn = get_db()
+    n = conn.execute("UPDATE snapshots SET executed=0, executed_at=NULL WHERE executed=1").rowcount
+    conn.commit()
+    conn.close()
+    log.info(f"Cooldown reset — cleared executed flag on {n} snapshot(s)")
+    return {"reset": True, "snapshots_cleared": n}
+
+
 def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     for f in ["positions_json", "benchmarks_json", "drift_json", "momentum_json", "suggested_actions"]:

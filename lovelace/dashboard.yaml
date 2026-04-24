@@ -263,6 +263,15 @@ views:
           confirmation:
             text: Mark rebalance as approved without placing any orders?
 
+      - type: button
+        name: Reset Rebalance Cooldown
+        icon: mdi:timer-refresh-outline
+        tap_action:
+          action: call-service
+          service: rest_command.reset_rebalance_cooldown
+          confirmation:
+            text: Clear the cooldown timer? Use after a failed execution to allow an immediate retry.
+
 
   # ═══════════════════════════════════
   # View 4: Benchmark History
