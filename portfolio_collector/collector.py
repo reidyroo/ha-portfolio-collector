@@ -666,6 +666,13 @@ def compute_snapshot() -> dict:
     rebalance_needed, rebalance_reason, suggested_actions = _compute_rebalance(
         cfg, positions, mom_scores, momentum, vix, total_value, max_drift_rel, hist
     )
+    log.info(f"Rebalance: {rebalance_needed} — {rebalance_reason}")
+    if suggested_actions:
+        for a in suggested_actions:
+            flag = " [BALANCING]" if a.get("balancing_trade") else ""
+            log.info(f"  Trade: {a['action']:4s} {a['symbol']:10s}  "
+                     f"cur={a['current_wt']:.1f}%  tgt={a['target_wt']:.1f}%  "
+                     f"£{a['delta_value']:+.0f}  {a['delta_units']} units{flag}")
 
     as_of = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     conn  = get_db()
@@ -800,7 +807,7 @@ def _compute_rebalance(cfg, positions, mom_scores, momentum, vix, total_value, m
         trade_cost       = abs(delta_val) * cost_rate
         expected_benefit = abs(delta_val) * abs(p["drift_rel"]) / 100.0
         if expected_benefit <= trade_cost:
-            log.debug(f"{sym}: cost filter — benefit £{expected_benefit:.2f} ≤ cost £{trade_cost:.2f}")
+            log.info(f"  Skipped {sym}: cost filter — benefit £{expected_benefit:.2f} ≤ cost £{trade_cost:.2f}, threshold={cost_rate*100:.2f}%")
             continue
         actions.append(_make_action(p, delta_val))
         traded_syms.add(sym)
