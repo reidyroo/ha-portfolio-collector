@@ -316,17 +316,24 @@ def _fallback_positions(cfg: dict) -> list:
 
 
 def place_market_order(cfg: dict, t212_ticker: str, quantity: float) -> dict:
-    """Place a market order. Only called after explicit approval."""
+    """Place a market order. Only called after explicit approval.
+    Positive quantity = BUY, negative quantity = SELL (T212 convention).
+    """
     if not cfg["t212_token"]:
         return {"error": "No t212_token configured"}
+    payload = {"ticker": t212_ticker, "quantity": round(quantity, 6)}
+    log.info(f"T212 order payload: {payload}  base={cfg['t212_base']}")
     try:
         r = requests.post(
             f"{cfg['t212_base']}/api/v0/equity/orders/market",
             headers=_t212_headers(cfg),
-            json={"ticker": t212_ticker, "quantity": round(abs(quantity), 6), "timeValidity": "DAY"},
+            json=payload,
             timeout=20,
         )
-        r.raise_for_status()
+        if not r.ok:
+            body = r.text[:500]
+            log.warning(f"T212 order rejected {r.status_code}: {body}")
+            return {"error": f"{r.status_code}", "detail": body}
         return r.json()
     except Exception as exc:
         return {"error": str(exc)}
@@ -672,7 +679,7 @@ def compute_snapshot() -> dict:
             flag = " [BALANCING]" if a.get("balancing_trade") else ""
             log.info(f"  Trade: {a['action']:4s} {a['symbol']:10s}  "
                      f"cur={a['current_wt']:.1f}%  tgt={a['target_wt']:.1f}%  "
-                     f"£{a['delta_value']:+.0f}  {a['delta_units']} units{flag}")
+                     f"£{a['delta_value']:+.0f}  {a['delta_units']:+.6f} units{flag}")
 
     as_of = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     conn  = get_db()
@@ -785,7 +792,7 @@ def _compute_rebalance(cfg, positions, mom_scores, momentum, vix, total_value, m
             "target_wt":           round(adj_weights[sym], 2),
             "original_target_wt":  int(cfg["target_weights"][sym]),
             "delta_value":         round(delta_val, 2),
-            "delta_units":         round(abs(delta_units), 6),
+            "delta_units":         round(delta_units, 6),   # signed: +ve=buy, -ve=sell
             "current_value":       round(p["market_value"], 2),
             "target_value":        round(total_value * adj_weights[sym] / 100, 2),
             "drift_rel":           p["drift_rel"],
