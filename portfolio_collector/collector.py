@@ -8,12 +8,15 @@ and suggests rebalance trades for manual approval in Home Assistant.
 
 API endpoints
 ─────────────
-GET  /api/health               Liveness probe
-GET  /api/latest-snapshot      Latest data (consumed by HA REST sensors)
-GET  /api/snapshots?limit=N    History (default 90 records)
-GET  /api/benchmarks?days=N    Benchmark history
-POST /api/collect              Run a full snapshot now
-POST /api/approve/{as_of}      Approve rebalance; add ?execute=true to place orders
+GET  /api/health                     Liveness probe
+GET  /api/latest-snapshot            Latest data (consumed by HA REST sensors)
+GET  /api/snapshots?limit=N          History (default 90 records)
+GET  /api/benchmarks?days=N          Benchmark history
+POST /api/collect                    Run a full snapshot now
+POST /api/approve/{as_of}            Approve rebalance; add ?execute=true to place orders
+POST /api/reset-cooldown             Clear rebalance cooldown after a failed execution
+POST /api/sync-from-t212             Sync holdings from live T212 portfolio
+POST /api/sync-from-t212?preview=true  Dry-run: see what would change without writing
 """
 
 import json
@@ -36,8 +39,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 # ── Runtime constants (never change at runtime) ───────────────────────────────
-DB_PATH = os.getenv("PORT_DB", "/data/portfolio.db")
-PORT    = int(os.getenv("PORT", "8000"))
+DB_PATH        = os.getenv("PORT_DB", "/data/portfolio.db")
+PORT           = int(os.getenv("PORT", "8000"))
+OPTIONS_PATH   = "/data/options.json"
 
 # ── ETF group definitions ──────────────────────────────────────────────────────
 # Group allocations define the neutral portfolio split.
@@ -67,6 +71,44 @@ GROUP_ORDER: dict[str, int] = {
     "optional_factor":    4,
 }
 
+# ── T212 ticker → Yahoo Finance symbol mapping ────────────────────────────────
+# Ordered longest-suffix-first so more specific rules win.
+_T212_EXCHANGE_MAP: list[tuple[str, str]] = [
+    ("_EQ_XLON", ".L"),    # London Stock Exchange
+    ("_EQ_XETA", ".DE"),   # XETRA Germany
+    ("_EQ_XAMS", ".AS"),   # Amsterdam (Euronext NL)
+    ("_EQ_XPAR", ".PA"),   # Paris (Euronext FR)
+    ("_EQ_XMIL", ".MI"),   # Milan (Borsa Italiana)
+    ("_EQ_XMAD", ".MC"),   # Madrid (BME)
+    ("_EQ_XSTO", ".ST"),   # Stockholm (Nasdaq Nordic)
+    ("_EQ_XCSE", ".CO"),   # Copenhagen
+    ("_EQ_XHEL", ".HE"),   # Helsinki
+    ("_EQ_XOSL", ".OL"),   # Oslo
+    ("_EQ_XNYS", ""),      # NYSE
+    ("_EQ_XNAS", ""),      # NASDAQ
+    ("_EQ_ARCX", ""),      # NYSE Arca (US ETFs)
+    ("_US_EQ",   ""),      # Generic US equity
+]
+
+VALID_GROUPS = list(GROUP_ORDER.keys())   # used for sync-from-t212 docs
+
+
+def _t212_ticker_to_yahoo(t212_ticker: str) -> str:
+    """Derive a Yahoo Finance symbol from a Trading 212 instrument ticker.
+
+    Examples:
+        VWRL_EQ_XLON  → VWRL.L
+        XWEM_EQ_XETA  → XWEM.DE
+        AAPL_US_EQ    → AAPL
+    """
+    for t212_suffix, yahoo_suffix in _T212_EXCHANGE_MAP:
+        if t212_ticker.endswith(t212_suffix):
+            return t212_ticker[: -len(t212_suffix)] + yahoo_suffix
+    # Fallback: strip the final _EXCHANGE segment
+    parts = t212_ticker.rsplit("_", 1)
+    return parts[0] if len(parts) == 2 else t212_ticker
+
+
 # ── Default holdings (used when options.json is absent / first run) ───────────
 # Format: yahoo_symbol, t212_ticker, target_weight, purchase_price, purchase_qty, group
 DEFAULT_HOLDINGS = [
@@ -93,21 +135,26 @@ BENCHMARKS = {
     "vix":        "^VIX",
 }
 
-app = FastAPI(title="Portfolio Collector", version="1.4.0")
+app = FastAPI(title="Portfolio Collector", version="1.5.0")
 
 
 # ── Options / config loader ───────────────────────────────────────────────────
 
 def _read_options() -> dict:
     """Read the HA add-on options from /data/options.json."""
-    path = "/data/options.json"
-    if os.path.exists(path):
+    if os.path.exists(OPTIONS_PATH):
         try:
-            with open(path) as f:
+            with open(OPTIONS_PATH) as f:
                 return json.load(f)
         except Exception as exc:
             log.error(f"Failed to read options.json: {exc}")
     return {}
+
+
+def _write_options(opts: dict) -> None:
+    """Write back to /data/options.json (preserves all non-holdings keys)."""
+    with open(OPTIONS_PATH, "w") as f:
+        json.dump(opts, f, indent=2)
 
 
 def _group_based_weights(holdings: list, group_allocs: dict) -> dict[str, float]:
@@ -874,7 +921,7 @@ def health():
         "t212_base":   cfg.get("t212_base", "https://demo.trading212.com"),
         "demo_mode":   "demo" in cfg.get("t212_base", "demo"),
         "holdings":    len(cfg.get("holdings", DEFAULT_HOLDINGS)),
-        "version":     "1.4.0",
+        "version":     "1.5.0",
     }
 
 
@@ -955,6 +1002,170 @@ def reset_cooldown():
     return {"reset": True, "snapshots_cleared": n}
 
 
+@app.post("/api/sync-from-t212")
+def sync_from_t212(preview: bool = False):
+    """
+    Sync the holdings list from the live T212 portfolio.
+
+    Behaviour
+    ─────────
+    • Existing holdings   — purchase_qty and purchase_price updated from T212.
+                            target_weight, group, and yahoo_symbol are preserved.
+    • New holdings        — added automatically.  target_weight is set to the
+                            holding's actual current weight in the T212 portfolio
+                            so the portfolio starts balanced.  group defaults to
+                            'global_beta' — edit it in the add-on options UI.
+    • Removed holdings    — present in config but zero / absent in T212 (sold).
+                            Dropped from the holdings list so they stop affecting
+                            rebalance calculations.
+
+    The updated holdings list is written back to /data/options.json, which is
+    read by the HA add-on configuration UI — open the add-on options page to
+    review and assign groups to any newly discovered holdings.
+
+    Valid group values: momentum_core, global_beta, regional_satellite,
+                        defensive, optional_factor
+
+    Pass ?preview=true to see what would change without writing anything.
+    """
+    cfg = load_config()
+    if not cfg["t212_token"]:
+        raise HTTPException(400, "t212_token not configured — cannot sync from T212")
+
+    # ── Fetch live positions ───────────────────────────────────────────────────
+    try:
+        r = requests.get(
+            f"{cfg['t212_base']}/api/v0/equity/portfolio",
+            headers=_t212_headers(cfg), timeout=20,
+        )
+        r.raise_for_status()
+        t212_positions: list = r.json()
+    except Exception as exc:
+        raise HTTPException(502, f"T212 portfolio fetch failed: {exc}")
+
+    log.info(f"T212 sync: {len(t212_positions)} position(s) from API")
+
+    # ── Calculate total portfolio value for weight derivation ─────────────────
+    # Uses currentPrice if available, falls back to averagePrice.
+    total_value = sum(
+        float(pos.get("quantity", 0))
+        * float(pos.get("currentPrice") or pos.get("averagePrice") or 0)
+        for pos in t212_positions
+        if float(pos.get("quantity", 0)) > 0
+    )
+
+    # ── Build lookup from current config ──────────────────────────────────────
+    opts = _read_options()
+    existing_holdings      = opts.get("holdings", DEFAULT_HOLDINGS)
+    existing_by_t212: dict = {h["t212_ticker"]: h for h in existing_holdings}
+
+    new_holdings: list = []
+    updated:      list = []
+    added:        list = []
+    removed:      list = []
+    t212_seen:    set  = set()
+
+    for pos in t212_positions:
+        t212_ticker   = pos.get("ticker", "")
+        quantity      = float(pos.get("quantity", 0))
+        average_price = float(pos.get("averagePrice") or 0)
+        current_price = float(pos.get("currentPrice") or average_price)
+        fill_date     = pos.get("initialFillDate", "")
+
+        if not t212_ticker or quantity <= 0:
+            continue
+        t212_seen.add(t212_ticker)
+
+        if t212_ticker in existing_by_t212:
+            # ── Known holding — preserve strategy fields, update cost basis ───
+            h = dict(existing_by_t212[t212_ticker])
+            old_qty   = float(h.get("purchase_qty",   0))
+            old_price = float(h.get("purchase_price", 0))
+            h["purchase_qty"]   = round(quantity, 6)
+            h["purchase_price"] = round(average_price, 4)
+            new_holdings.append(h)
+            qty_changed   = abs(old_qty   - quantity)      > 0.000001
+            price_changed = abs(old_price - average_price) > 0.001
+            if qty_changed or price_changed:
+                updated.append({
+                    "t212_ticker":  t212_ticker,
+                    "yahoo_symbol": h["yahoo_symbol"],
+                    "old_qty":      round(old_qty,   6),
+                    "new_qty":      round(quantity,  6),
+                    "old_price":    round(old_price,     4),
+                    "new_price":    round(average_price, 4),
+                })
+                log.info(f"  Sync updated: {t212_ticker}  "
+                         f"qty {old_qty:.4f}→{quantity:.4f}  "
+                         f"price {old_price:.4f}→{average_price:.4f}")
+        else:
+            # ── New holding — derive yahoo symbol and calculate actual weight ─
+            yahoo_sym    = _t212_ticker_to_yahoo(t212_ticker)
+            market_value = quantity * current_price
+            actual_wt    = round(market_value / total_value * 100, 2) if total_value else 0.0
+            h = {
+                "yahoo_symbol":  yahoo_sym,
+                "t212_ticker":   t212_ticker,
+                "target_weight": actual_wt,   # start balanced at current weight
+                "purchase_price": round(average_price, 4),
+                "purchase_qty":   round(quantity, 6),
+                "group":          "global_beta",  # edit in add-on options UI
+            }
+            new_holdings.append(h)
+            added.append({
+                "t212_ticker":   t212_ticker,
+                "yahoo_symbol":  yahoo_sym,
+                "qty":           round(quantity, 6),
+                "avg_price":     round(average_price, 4),
+                "target_weight": actual_wt,
+                "group":         "global_beta",
+                "fill_date":     fill_date,
+                "note": (
+                    "Added with group='global_beta' and target_weight set to current "
+                    "portfolio weight. Edit group in the add-on options UI. "
+                    f"Valid groups: {', '.join(VALID_GROUPS)}"
+                ),
+            })
+            log.info(f"  Sync new: {t212_ticker} → {yahoo_sym}  "
+                     f"qty={quantity:.4f}  wt={actual_wt:.1f}%  group=global_beta")
+
+    # ── Holdings in config no longer in T212 (sold / closed) ──────────────────
+    for h in existing_holdings:
+        if h["t212_ticker"] not in t212_seen:
+            removed.append({
+                "t212_ticker":  h["t212_ticker"],
+                "yahoo_symbol": h["yahoo_symbol"],
+                "note": "Zero/absent in T212 portfolio — removed from holdings config",
+            })
+            log.info(f"  Sync removed: {h['t212_ticker']} (not in T212)")
+
+    result = {
+        "preview":          preview,
+        "as_of":            datetime.now(timezone.utc).isoformat(),
+        "t212_positions":   len(t212_seen),
+        "holdings_before":  len(existing_holdings),
+        "holdings_after":   len(new_holdings),
+        "updated":          updated,
+        "added":            added,
+        "removed":          removed,
+    }
+
+    if not preview:
+        try:
+            opts["holdings"] = new_holdings
+            _write_options(opts)
+            log.info(
+                f"Sync written to options.json — "
+                f"{len(new_holdings)} holdings  "
+                f"({len(updated)} updated, {len(added)} added, {len(removed)} removed)"
+            )
+            result["written"] = True
+        except Exception as exc:
+            raise HTTPException(500, f"Failed to write options.json: {exc}")
+
+    return result
+
+
 def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     for f in ["positions_json", "benchmarks_json", "drift_json", "momentum_json", "suggested_actions"]:
@@ -978,6 +1189,6 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
 if __name__ == "__main__":
     init_db()
     cfg = load_config()
-    log.info(f"Portfolio Collector v1.4.0 — {len(cfg['target_weights'])} holdings — "
+    log.info(f"Portfolio Collector v1.5.0 — {len(cfg['target_weights'])} holdings — "
              f"DB: {DB_PATH} — T212: {cfg['t212_base']}")
     uvicorn.run(app, host="0.0.0.0", port=PORT)

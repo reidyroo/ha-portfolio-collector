@@ -240,6 +240,33 @@ views:
             Approving trades will submit **real orders** to Trading 212.
             Verify the trade plan above before toggling approval.
 
+      # ── T212 sync ─────────────────────────────────────────────────────────
+      - type: button
+        name: Sync Holdings from T212
+        icon: mdi:cloud-sync
+        tap_action:
+          action: call-service
+          service: rest_command.sync_portfolio_from_t212
+          confirmation:
+            text: >
+              Pull current quantities and average prices from your T212 account?
+              New holdings will be added with their current portfolio weight as
+              the default target. Sold holdings will be removed. Check the
+              add-on logs and options page afterwards to assign groups to any
+              new holdings (valid groups: momentum_core, global_beta,
+              regional_satellite, defensive, optional_factor).
+
+      - type: button
+        name: Preview T212 Sync (dry run)
+        icon: mdi:cloud-search-outline
+        tap_action:
+          action: call-service
+          service: rest_command.preview_t212_sync
+          confirmation:
+            text: >
+              Run a dry-run sync preview? Nothing will be written.
+              Check the add-on logs to see what would change.
+
       - type: button
         name: Run Snapshot Now
         icon: mdi:refresh
