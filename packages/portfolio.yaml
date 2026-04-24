@@ -214,6 +214,24 @@ rest_command:
     content_type: "application/json"
     timeout: 30
 
+  reset_rebalance_cooldown:
+    url: "http://localhost:8000/api/reset-cooldown"
+    method: POST
+    content_type: "application/json"
+    timeout: 10
+
+  sync_portfolio_from_t212:
+    url: "http://localhost:8000/api/sync-from-t212"
+    method: POST
+    content_type: "application/json"
+    timeout: 30
+
+  preview_t212_sync:
+    url: "http://localhost:8000/api/sync-from-t212?preview=true"
+    method: POST
+    content_type: "application/json"
+    timeout: 30
+
 
 # ── Automations ──────────────────────────────────────────────────────────────
 automation:
