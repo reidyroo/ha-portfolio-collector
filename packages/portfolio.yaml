@@ -128,6 +128,7 @@ input_select:
     name: "Portfolio Phase"
     options:
       - "Momentum-Max"
+      - "Momentum-Chill"
       - "Balanced Growth"
       - "Pre-Retirement"
     initial: "Momentum-Max"

@@ -4,6 +4,28 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [1.6.1] — 2026-04-25
+
+### Added
+- **`Momentum-Chill` phase preset** — a fourth named phase derived directly from
+  the default 13-ETF portfolio's original target weights:
+
+  | Group | Allocation | Source holdings |
+  |---|:---:|---|
+  | Momentum Core | 30% | IWFM 14% + XDEM 10% + XWEM 6% |
+  | Global Beta | 28% | VWRL 18% + SSAC 10% |
+  | Regional Satellite | 22% | VUSA 8% + IMEU 6% + IJPN 4% + VFEM 4% |
+  | Defensive | 16% | VAGP 12% + IGLS 4% |
+  | Optional Factor | 4% | IWFQ 3% + MVOL 1% |
+
+  Guard-rails: CVaR 5.5%, cost filter 0.10%, cooldown 21d, VIX high 25.
+  Sits between Momentum-Max and Balanced Growth in aggression.
+- `Momentum-Chill` added to `input_select.portfolio_phase` options in
+  `packages/portfolio.yaml`.
+- `Momentum-Chill` case added to the Active Phase Settings dashboard card.
+
+---
+
 ## [1.6.0] — 2026-04-25
 
 ### Added
