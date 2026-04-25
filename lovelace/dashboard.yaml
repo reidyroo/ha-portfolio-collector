@@ -208,6 +208,15 @@ views:
           | Regional Satellite | 15% | | Cooldown | 21 days |
           | Defensive | 5% | | VIX high at | 25 |
           | Optional Factor | 5% | | | |
+          {% elif p == 'Momentum-Chill' %}
+          **Momentum-Chill** — original portfolio pattern, balanced momentum
+          | Group | Target | | Setting | Value |
+          |---|:---:|---|---|:---:|
+          | Momentum Core | 30% | | CVaR limit | 5.5% |
+          | Global Beta | 28% | | Cost filter | 0.10% |
+          | Regional Satellite | 22% | | Cooldown | 21 days |
+          | Defensive | 16% | | VIX high at | 25 |
+          | Optional Factor | 4% | | | |
           {% elif p == 'Balanced Growth' %}
           **Balanced Growth** — mid-career, growing volatility cushion
           | Group | Target | | Setting | Value |

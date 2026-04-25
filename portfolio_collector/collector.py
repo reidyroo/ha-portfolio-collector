@@ -93,6 +93,23 @@ PHASE_SETTINGS: dict[str, dict] = {
         "min_days_between_rebalance": 21,
         "vix_high_threshold":         25.0,
     },
+    "Momentum-Chill": {
+        # Original portfolio pattern — strong momentum with meaningful regional
+        # diversification and a real defensive sleeve; weights derived directly
+        # from the default 13-ETF holdings (IWFM+XDEM+XWEM=30, VWRL+SSAC=28,
+        # VUSA+IMEU+IJPN+VFEM=22, VAGP+IGLS=16, IWFQ+MVOL=4).
+        "group_allocations": {
+            "momentum_core":       30.0,
+            "global_beta":         28.0,
+            "regional_satellite":  22.0,
+            "defensive":           16.0,
+            "optional_factor":      4.0,
+        },
+        "max_cvar_pct":               5.5,   # between Max and Balanced Growth
+        "cost_rate_pct":              0.10,
+        "min_days_between_rebalance": 21,
+        "vix_high_threshold":         25.0,
+    },
     "Balanced Growth": {
         # Mid-career — meaningful growth with growing volatility cushion
         "group_allocations": {
@@ -187,7 +204,7 @@ BENCHMARKS = {
     "vix":        "^VIX",
 }
 
-app = FastAPI(title="Portfolio Collector", version="1.6.0")
+app = FastAPI(title="Portfolio Collector", version="1.6.1")
 
 
 # ── Options / config loader ───────────────────────────────────────────────────
@@ -995,7 +1012,7 @@ def health():
         "demo_mode":   "demo" in cfg.get("t212_base", "demo"),
         "holdings":    len(cfg.get("holdings", DEFAULT_HOLDINGS)),
         "phase":       cfg.get("portfolio_phase", "Momentum-Max"),
-        "version":     "1.6.0",
+        "version":     "1.6.1",
     }
 
 
@@ -1302,6 +1319,6 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
 if __name__ == "__main__":
     init_db()
     cfg = load_config()
-    log.info(f"Portfolio Collector v1.6.0 — {len(cfg['target_weights'])} holdings — "
+    log.info(f"Portfolio Collector v1.6.1 — {len(cfg['target_weights'])} holdings — "
              f"DB: {DB_PATH} — T212: {cfg['t212_base']}")
     uvicorn.run(app, host="0.0.0.0", port=PORT)
