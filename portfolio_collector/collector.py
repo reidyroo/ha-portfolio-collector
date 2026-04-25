@@ -17,6 +17,7 @@ POST /api/approve/{as_of}            Approve rebalance; add ?execute=true to pla
 POST /api/reset-cooldown             Clear rebalance cooldown after a failed execution
 POST /api/sync-from-t212             Sync holdings from live T212 portfolio
 POST /api/sync-from-t212?preview=true  Dry-run: see what would change without writing
+POST /api/set-phase                  Apply a named portfolio phase preset {"phase": "..."}
 """
 
 import json
@@ -32,7 +33,7 @@ import pandas as pd
 import requests
 import uvicorn
 import yfinance as yf
-from fastapi import FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -69,6 +70,57 @@ GROUP_ORDER: dict[str, int] = {
     "regional_satellite": 2,
     "defensive":          3,
     "optional_factor":    4,
+}
+
+# ── Phase presets ─────────────────────────────────────────────────────────────
+# Each phase defines all guard-rail and allocation settings as a single bundle.
+# Selecting a phase (via the HA dashboard or POST /api/set-phase) applies the
+# full preset; individual options.json values for these keys are overridden.
+# To use fully custom settings, set portfolio_phase to any unrecognised string
+# (e.g. "Custom") and configure each option individually.
+PHASE_SETTINGS: dict[str, dict] = {
+    "Momentum-Max": {
+        # Early accumulation — maximise growth, accept volatility, long horizon
+        "group_allocations": {
+            "momentum_core":       35.0,
+            "global_beta":         40.0,
+            "regional_satellite":  15.0,
+            "defensive":            5.0,
+            "optional_factor":      5.0,
+        },
+        "max_cvar_pct":               6.5,   # only fires in genuine crisis
+        "cost_rate_pct":              0.10,  # execute momentum tilts freely
+        "min_days_between_rebalance": 21,
+        "vix_high_threshold":         25.0,
+    },
+    "Balanced Growth": {
+        # Mid-career — meaningful growth with growing volatility cushion
+        "group_allocations": {
+            "momentum_core":       25.0,
+            "global_beta":         38.0,
+            "regional_satellite":  17.0,
+            "defensive":           15.0,
+            "optional_factor":      5.0,
+        },
+        "max_cvar_pct":               4.5,   # fires in elevated markets
+        "cost_rate_pct":              0.10,
+        "min_days_between_rebalance": 21,
+        "vix_high_threshold":         25.0,
+    },
+    "Pre-Retirement": {
+        # Capital preservation — bonds dominate, momentum bets shrink
+        "group_allocations": {
+            "momentum_core":       10.0,
+            "global_beta":         33.0,
+            "regional_satellite":  12.0,
+            "defensive":           35.0,
+            "optional_factor":     10.0,
+        },
+        "max_cvar_pct":               3.0,   # proactive defensive tilt
+        "cost_rate_pct":              0.20,  # reduce churn near retirement
+        "min_days_between_rebalance": 28,    # slower cadence
+        "vix_high_threshold":         20.0,  # tighter elevated-market rule
+    },
 }
 
 # ── T212 ticker → Yahoo Finance symbol mapping ────────────────────────────────
@@ -135,7 +187,7 @@ BENCHMARKS = {
     "vix":        "^VIX",
 }
 
-app = FastAPI(title="Portfolio Collector", version="1.5.0")
+app = FastAPI(title="Portfolio Collector", version="1.6.0")
 
 
 # ── Options / config loader ───────────────────────────────────────────────────
@@ -226,11 +278,31 @@ def load_config() -> dict:
             "group":          h.get("group") or _default_group_map.get(sym, "global_beta"),
         })
 
-    # Build group_allocations (allow per-key overrides from options)
-    group_allocs = {
-        k: float(opts.get("group_allocations", {}).get(k, v))
-        for k, v in GROUP_ALLOCATIONS.items()
-    }
+    # ── Phase preset — drives group allocations and all guard-rail settings ──────
+    # When portfolio_phase matches a known preset the full bundle applies.
+    # Individual options.json values for the same keys are ignored.
+    # Set portfolio_phase to any other string (e.g. "Custom") to fall back to
+    # the per-key options values.
+    phase        = opts.get("portfolio_phase", "Momentum-Max")
+    preset       = PHASE_SETTINGS.get(phase)
+
+    if preset:
+        log.info(f"Phase '{phase}' active — applying preset guard-rails and allocations")
+        group_allocs   = dict(preset["group_allocations"])
+        cfg_max_cvar   = preset["max_cvar_pct"]
+        cfg_cost_rate  = preset["cost_rate_pct"]
+        cfg_cooldown   = preset["min_days_between_rebalance"]
+        cfg_vix_high   = preset["vix_high_threshold"]
+    else:
+        log.info(f"Phase '{phase}' — using individual options settings")
+        group_allocs   = {
+            k: float(opts.get("group_allocations", {}).get(k, v))
+            for k, v in GROUP_ALLOCATIONS.items()
+        }
+        cfg_max_cvar   = float(opts.get("max_cvar_pct",  5.0))
+        cfg_cost_rate  = float(opts.get("cost_rate_pct", 0.1))
+        cfg_cooldown   = int(opts.get("min_days_between_rebalance", 21))
+        cfg_vix_high   = float(opts.get("vix_high_threshold", 25))
 
     cfg_use_group_weights = bool(opts.get("use_group_weights", False))
 
@@ -249,13 +321,14 @@ def load_config() -> dict:
         "t212_token":                  opts.get("t212_token",  os.getenv("T212_TOKEN", "")).strip(),
         "t212_base":                   opts.get("t212_base",   os.getenv("T212_BASE", "https://demo.trading212.com")).strip(),
         "purchase_date":               opts.get("purchase_date", "2026-04-07"),
-        "drift_threshold_pct":         float(opts.get("drift_threshold_pct",         15)),
-        "vix_high_threshold":          float(opts.get("vix_high_threshold",           25)),
-        "vix_extreme_threshold":       float(opts.get("vix_extreme_threshold",        35)),
-        "min_days_between_rebalance":  int(opts.get("min_days_between_rebalance",    21)),
+        "portfolio_phase":             phase,
+        "drift_threshold_pct":         float(opts.get("drift_threshold_pct", 15)),
+        "vix_high_threshold":          cfg_vix_high,
+        "vix_extreme_threshold":       float(opts.get("vix_extreme_threshold", 35)),
+        "min_days_between_rebalance":  cfg_cooldown,
         "use_group_weights":           cfg_use_group_weights,
-        "max_cvar_pct":                float(opts.get("max_cvar_pct", 5.0)),
-        "cost_rate_pct":               float(opts.get("cost_rate_pct", 0.1)),
+        "max_cvar_pct":                cfg_max_cvar,
+        "cost_rate_pct":               cfg_cost_rate,
         "group_allocations":           group_allocs,
         "holdings":                    holdings,
         # target_weights are whole-number ints — no fractional drift noise
@@ -921,7 +994,8 @@ def health():
         "t212_base":   cfg.get("t212_base", "https://demo.trading212.com"),
         "demo_mode":   "demo" in cfg.get("t212_base", "demo"),
         "holdings":    len(cfg.get("holdings", DEFAULT_HOLDINGS)),
-        "version":     "1.5.0",
+        "phase":       cfg.get("portfolio_phase", "Momentum-Max"),
+        "version":     "1.6.0",
     }
 
 
@@ -1000,6 +1074,45 @@ def reset_cooldown():
     conn.close()
     log.info(f"Cooldown reset — cleared executed flag on {n} snapshot(s)")
     return {"reset": True, "snapshots_cleared": n}
+
+
+@app.post("/api/set-phase")
+def set_phase(body: dict = Body(default={})):
+    """
+    Apply a named portfolio phase preset, writing portfolio_phase to options.json.
+
+    Request body: {"phase": "Momentum-Max"}   (or "Balanced Growth" / "Pre-Retirement")
+
+    The preset immediately sets group allocations, CVaR limit, cost filter,
+    rebalance cooldown, and VIX high threshold for the next snapshot.
+    The change is also reflected in the HA add-on Configuration tab.
+
+    Returns the full preset so the caller can display what was applied.
+    """
+    phase = body.get("phase", "").strip()
+    if not phase:
+        raise HTTPException(400, "Request body must contain {\"phase\": \"<name>\"}")
+    if phase not in PHASE_SETTINGS:
+        raise HTTPException(
+            400,
+            f"Unknown phase '{phase}'. Valid values: {list(PHASE_SETTINGS.keys())}"
+        )
+
+    opts = _read_options()
+    opts["portfolio_phase"] = phase
+    try:
+        _write_options(opts)
+    except Exception as exc:
+        raise HTTPException(500, f"Failed to write options.json: {exc}")
+
+    preset = PHASE_SETTINGS[phase]
+    log.info(
+        f"Phase set to '{phase}': "
+        f"CVaR={preset['max_cvar_pct']}%  cost={preset['cost_rate_pct']}%  "
+        f"cooldown={preset['min_days_between_rebalance']}d  "
+        f"vix_high={preset['vix_high_threshold']}"
+    )
+    return {"phase": phase, "settings": preset}
 
 
 @app.post("/api/sync-from-t212")
@@ -1189,6 +1302,6 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
 if __name__ == "__main__":
     init_db()
     cfg = load_config()
-    log.info(f"Portfolio Collector v1.5.0 — {len(cfg['target_weights'])} holdings — "
+    log.info(f"Portfolio Collector v1.6.0 — {len(cfg['target_weights'])} holdings — "
              f"DB: {DB_PATH} — T212: {cfg['t212_base']}")
     uvicorn.run(app, host="0.0.0.0", port=PORT)

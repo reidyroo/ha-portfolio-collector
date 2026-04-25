@@ -194,6 +194,42 @@ views:
           - entity: sensor.vix_level
             name: VIX
 
+      # ── Active phase summary ──────────────────────────────────────────────
+      - type: markdown
+        title: Active Phase Settings
+        content: |
+          {% set p = states('input_select.portfolio_phase') %}
+          {% if p == 'Momentum-Max' %}
+          **Momentum-Max** — early accumulation, maximum growth
+          | Group | Target | | Setting | Value |
+          |---|:---:|---|---|:---:|
+          | Momentum Core | 35% | | CVaR limit | 6.5% |
+          | Global Beta | 40% | | Cost filter | 0.10% |
+          | Regional Satellite | 15% | | Cooldown | 21 days |
+          | Defensive | 5% | | VIX high at | 25 |
+          | Optional Factor | 5% | | | |
+          {% elif p == 'Balanced Growth' %}
+          **Balanced Growth** — mid-career, growing volatility cushion
+          | Group | Target | | Setting | Value |
+          |---|:---:|---|---|:---:|
+          | Momentum Core | 25% | | CVaR limit | 4.5% |
+          | Global Beta | 38% | | Cost filter | 0.10% |
+          | Regional Satellite | 17% | | Cooldown | 21 days |
+          | Defensive | 15% | | VIX high at | 25 |
+          | Optional Factor | 5% | | | |
+          {% elif p == 'Pre-Retirement' %}
+          **Pre-Retirement** — capital preservation, bonds dominate
+          | Group | Target | | Setting | Value |
+          |---|:---:|---|---|:---:|
+          | Momentum Core | 10% | | CVaR limit | 3.0% |
+          | Global Beta | 33% | | Cost filter | 0.20% |
+          | Regional Satellite | 12% | | Cooldown | 28 days |
+          | Defensive | 35% | | VIX high at | 20 |
+          | Optional Factor | 10% | | | |
+          {% else %}
+          **{{ p }}** — custom settings active (configured in add-on options)
+          {% endif %}
+
       - type: markdown
         title: Rebalance Reason
         content: |

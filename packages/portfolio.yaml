@@ -232,6 +232,13 @@ rest_command:
     content_type: "application/json"
     timeout: 30
 
+  set_portfolio_phase:
+    url: "http://localhost:8000/api/set-phase"
+    method: POST
+    content_type: "application/json"
+    payload: '{"phase": "{{ states(''input_select.portfolio_phase'') }}"}'
+    timeout: 10
+
 
 # ── Automations ──────────────────────────────────────────────────────────────
 automation:
@@ -305,6 +312,25 @@ automation:
           message: >
             Market regime: {{ states('sensor.vix_regime') }}.
             Momentum-based rebalancing is paused until VIX returns below 25.
+
+  - id: portfolio_phase_change
+    alias: "Portfolio: Apply phase settings when phase selector changes"
+    trigger:
+      - platform: state
+        entity_id: input_select.portfolio_phase
+    condition:
+      - condition: template
+        value_template: >
+          {{ trigger.to_state.state != trigger.from_state.state }}
+    action:
+      - service: rest_command.set_portfolio_phase
+      - service: notify.persistent_notification
+        data:
+          title: "Portfolio Phase → {{ states('input_select.portfolio_phase') }}"
+          message: >
+            Phase settings updated. Group allocations, CVaR limit, cost filter,
+            cooldown, and VIX threshold have been reconfigured.
+            Run a new snapshot to apply the changes to rebalance calculations.
 
   - id: portfolio_collector_stale_alert
     alias: "Portfolio: Alert if snapshot is stale"

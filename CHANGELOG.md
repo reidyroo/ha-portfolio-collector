@@ -4,6 +4,41 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [1.6.0] — 2026-04-25
+
+### Added
+- **Portfolio phase presets** — three named bundles that set group allocations,
+  CVaR limit, cost filter, rebalance cooldown, and VIX high threshold together:
+
+  | Phase | Momentum Core | Global Beta | Regional | Defensive | Optional | CVaR | Cost | Cooldown | VIX high |
+  |---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+  | Momentum-Max | 35% | 40% | 15% | 5% | 5% | 6.5% | 0.10% | 21d | 25 |
+  | Balanced Growth | 25% | 38% | 17% | 15% | 5% | 4.5% | 0.10% | 21d | 25 |
+  | Pre-Retirement | 10% | 33% | 12% | 35% | 10% | 3.0% | 0.20% | 28d | 20 |
+
+- **`POST /api/set-phase`** — accepts `{"phase": "Balanced Growth"}` and writes
+  `portfolio_phase` to `options.json`; the next snapshot picks up the full preset.
+- **`portfolio_phase` option** added to `config.yaml` (default: `"Momentum-Max"`).
+  Visible and editable in the HA add-on Configuration UI.
+- **`rest_command.set_portfolio_phase`** in `packages/portfolio.yaml` — sends the
+  current `input_select.portfolio_phase` state to the set-phase endpoint.
+- **Automation `portfolio_phase_change`** — fires automatically when the HA
+  dashboard phase selector changes; applies the preset and sends a persistent
+  notification reminding the user to trigger a new snapshot.
+- **Active Phase Settings card** on the Rebalance dashboard tab — shows the full
+  allocation table and guard-rail values for the currently active phase.
+- `phase` field added to `GET /api/health` response.
+
+### Changed
+- `load_config()` now reads `portfolio_phase` from options and applies the full
+  phase preset when a recognised phase name is selected. Individual `max_cvar_pct`,
+  `cost_rate_pct`, `min_days_between_rebalance`, `vix_high_threshold`, and
+  `group_allocations` options are overridden by the preset; set
+  `portfolio_phase` to a custom string (e.g. `"Custom"`) to use individual values.
+- Version bumped to `1.6.0` throughout.
+
+---
+
 ## [1.5.0] — 2026-04-24
 
 ### Added
