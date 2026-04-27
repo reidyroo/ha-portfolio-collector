@@ -4,6 +4,28 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [1.6.2] — 2026-04-27
+
+### Changed
+- **Default holdings** — replaced `XWEM.DE` with three LSE-listed thematic ETFs,
+  redistributing its ~6% momentum-core slot equally (~2% each):
+
+  | Removed | Added | Group | Target |
+  |---|---|---|:---:|
+  | XWEM.DE (XWEM_EQ_XETA) | SMGB.L (SMGB_EQ_XLON) | momentum_core | 2% |
+  | | IITU.L (IITU_EQ_XLON) | momentum_core | 2% |
+  | | AIAG.L (AIAG_EQ_XLON) | momentum_core | 2% |
+
+  The momentum_core group now has 5 ETFs (IWFM, XDEM, SMGB, IITU, AIAG).
+  Weights for new holdings are 0.0 until first purchase and T212 sync.
+
+- **`POST /api/sync-from-t212`** — new holdings are now auto-assigned a group
+  by looking up their `yahoo_symbol` in `DEFAULT_HOLDINGS` before falling back
+  to `global_beta`. SMGB.L, IITU.L, and AIAG.L will correctly receive
+  `group: momentum_core` automatically after the T212 sync.
+
+---
+
 ## [1.6.1] — 2026-04-25
 
 ### Added

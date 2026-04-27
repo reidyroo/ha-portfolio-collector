@@ -182,18 +182,21 @@ def _t212_ticker_to_yahoo(t212_ticker: str) -> str:
 # Format: yahoo_symbol, t212_ticker, target_weight, purchase_price, purchase_qty, group
 DEFAULT_HOLDINGS = [
     {"yahoo_symbol": "VWRL.L",  "t212_ticker": "VWRL_EQ_XLON",  "target_weight": 18.00, "purchase_price": 123.67, "purchase_qty":  7.278609, "group": "global_beta"},
-    {"yahoo_symbol": "IWFM.L",  "t212_ticker": "IWFM_EQ_XLON",  "target_weight": 14.01, "purchase_price":  72.41, "purchase_qty":  9.671180, "group": "momentum_core"},
+    {"yahoo_symbol": "IWFM.L",  "t212_ticker": "IWFM_EQ_XLON",  "target_weight": 14.00, "purchase_price":  72.41, "purchase_qty":  9.671180, "group": "momentum_core"},
     {"yahoo_symbol": "VAGP.L",  "t212_ticker": "VAGP_EQ_XLON",  "target_weight": 12.00, "purchase_price":  22.50, "purchase_qty": 26.666670, "group": "defensive"},
     {"yahoo_symbol": "XDEM.L",  "t212_ticker": "XDEM_EQ_XLON",  "target_weight": 10.00, "purchase_price":  60.86, "purchase_qty":  8.214227, "group": "momentum_core"},
     {"yahoo_symbol": "SSAC.L",  "t212_ticker": "SSAC_EQ_XLON",  "target_weight": 10.00, "purchase_price":  81.47, "purchase_qty":  6.137982, "group": "global_beta"},
     {"yahoo_symbol": "VUSA.L",  "t212_ticker": "VUSA_EQ_XLON",  "target_weight":  8.00, "purchase_price":  94.25, "purchase_qty":  4.243244, "group": "regional_satellite"},
-    {"yahoo_symbol": "XWEM.DE", "t212_ticker": "XWEM_EQ_XETA",  "target_weight":  5.99, "purchase_price":  42.32, "purchase_qty":  7.079663, "group": "momentum_core"},
     {"yahoo_symbol": "IMEU.L",  "t212_ticker": "IMEU_EQ_XLON",  "target_weight":  6.00, "purchase_price":  32.57, "purchase_qty":  9.212345, "group": "regional_satellite"},
     {"yahoo_symbol": "IJPN.L",  "t212_ticker": "IJPN_EQ_XLON",  "target_weight":  4.00, "purchase_price":  16.83, "purchase_qty": 11.883540, "group": "regional_satellite"},
     {"yahoo_symbol": "VFEM.L",  "t212_ticker": "VFEM_EQ_XLON",  "target_weight":  4.00, "purchase_price":  58.03, "purchase_qty":  3.447384, "group": "regional_satellite"},
     {"yahoo_symbol": "IGLS.L",  "t212_ticker": "IGLS_EQ_XLON",  "target_weight":  4.00, "purchase_price": 126.45, "purchase_qty":  1.581903, "group": "defensive"},
     {"yahoo_symbol": "IWFQ.L",  "t212_ticker": "IWFQ_EQ_XLON",  "target_weight":  3.00, "purchase_price":  59.67, "purchase_qty":  2.512984, "group": "optional_factor"},
     {"yahoo_symbol": "MVOL.L",  "t212_ticker": "MVOL_EQ_XLON",  "target_weight":  1.00, "purchase_price":  55.92, "purchase_qty":  0.892925, "group": "optional_factor"},
+    # Momentum-core thematic additions (replacing XWEM.DE — ~2% each from its ~6% slot)
+    {"yahoo_symbol": "SMGB.L",  "t212_ticker": "SMGB_EQ_XLON",  "target_weight":  2.00, "purchase_price":  0.00, "purchase_qty":  0.0, "group": "momentum_core"},
+    {"yahoo_symbol": "IITU.L",  "t212_ticker": "IITU_EQ_XLON",  "target_weight":  2.00, "purchase_price":  0.00, "purchase_qty":  0.0, "group": "momentum_core"},
+    {"yahoo_symbol": "AIAG.L",  "t212_ticker": "AIAG_EQ_XLON",  "target_weight":  2.00, "purchase_price":  0.00, "purchase_qty":  0.0, "group": "momentum_core"},
 ]
 
 BENCHMARKS = {
@@ -204,7 +207,7 @@ BENCHMARKS = {
     "vix":        "^VIX",
 }
 
-app = FastAPI(title="Portfolio Collector", version="1.6.1")
+app = FastAPI(title="Portfolio Collector", version="1.6.2")
 
 
 # ── Options / config loader ───────────────────────────────────────────────────
@@ -1012,7 +1015,7 @@ def health():
         "demo_mode":   "demo" in cfg.get("t212_base", "demo"),
         "holdings":    len(cfg.get("holdings", DEFAULT_HOLDINGS)),
         "phase":       cfg.get("portfolio_phase", "Momentum-Max"),
-        "version":     "1.6.1",
+        "version":     "1.6.2",
     }
 
 
@@ -1233,13 +1236,18 @@ def sync_from_t212(preview: bool = False):
             yahoo_sym    = _t212_ticker_to_yahoo(t212_ticker)
             market_value = quantity * current_price
             actual_wt    = round(market_value / total_value * 100, 2) if total_value else 0.0
+            # Use the group from DEFAULT_HOLDINGS if this is a known ETF, otherwise
+            # fall back to global_beta so the user only needs to edit truly unknown ones.
+            _default_group_map = {d["yahoo_symbol"]: d["group"] for d in DEFAULT_HOLDINGS}
+            auto_group   = _default_group_map.get(yahoo_sym, "global_beta")
+            needs_review = auto_group == "global_beta" and yahoo_sym not in _default_group_map
             h = {
                 "yahoo_symbol":  yahoo_sym,
                 "t212_ticker":   t212_ticker,
                 "target_weight": actual_wt,   # start balanced at current weight
                 "purchase_price": round(average_price, 4),
                 "purchase_qty":   round(quantity, 6),
-                "group":          "global_beta",  # edit in add-on options UI
+                "group":          auto_group,
             }
             new_holdings.append(h)
             added.append({
@@ -1248,16 +1256,21 @@ def sync_from_t212(preview: bool = False):
                 "qty":           round(quantity, 6),
                 "avg_price":     round(average_price, 4),
                 "target_weight": actual_wt,
-                "group":         "global_beta",
+                "group":         auto_group,
                 "fill_date":     fill_date,
                 "note": (
-                    "Added with group='global_beta' and target_weight set to current "
-                    "portfolio weight. Edit group in the add-on options UI. "
+                    f"Added with group='{auto_group}' (from default holdings map). "
+                    "Edit group in the add-on options UI if incorrect. "
+                    f"Valid groups: {', '.join(VALID_GROUPS)}"
+                ) if not needs_review else (
+                    "Added with group='global_beta' — not in default holdings map. "
+                    "Edit group in the add-on options UI. "
                     f"Valid groups: {', '.join(VALID_GROUPS)}"
                 ),
             })
             log.info(f"  Sync new: {t212_ticker} → {yahoo_sym}  "
-                     f"qty={quantity:.4f}  wt={actual_wt:.1f}%  group=global_beta")
+                     f"qty={quantity:.4f}  wt={actual_wt:.1f}%  group={auto_group}"
+                     + ("" if not needs_review else "  ⚠ unknown ETF — check group"))
 
     # ── Holdings in config no longer in T212 (sold / closed) ──────────────────
     for h in existing_holdings:
@@ -1319,6 +1332,6 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
 if __name__ == "__main__":
     init_db()
     cfg = load_config()
-    log.info(f"Portfolio Collector v1.6.1 — {len(cfg['target_weights'])} holdings — "
+    log.info(f"Portfolio Collector v1.6.2 — {len(cfg['target_weights'])} holdings — "
              f"DB: {DB_PATH} — T212: {cfg['t212_base']}")
     uvicorn.run(app, host="0.0.0.0", port=PORT)
