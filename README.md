@@ -249,6 +249,51 @@ Use **Preview T212 Sync** for a dry run that logs the diff without writing anyth
 
 ---
 
+## Using a T212 Pie
+
+T212 Pies let you set target percentages for a basket of ETFs and rebalance in one click.
+This is the recommended execution method — it handles fractional shares, automatic rounding,
+and partial rebalances with new deposits far more smoothly than placing individual market orders.
+
+### How the Pie and collector work together
+
+| Responsibility | T212 Pie | Collector |
+|---|---|---|
+| Setting target allocations | ✅ Pie % slices | ✅ `target_weight` in config |
+| Executing trades | ✅ Pie Rebalance button | ❌ Do not use live mode |
+| Momentum scoring | ❌ | ✅ |
+| Drift monitoring | ❌ | ✅ |
+| Benchmark comparison | ❌ | ✅ |
+| Rebalance signal | ❌ | ✅ triggers notification |
+| Cost basis / P&L | ❌ | ✅ via T212 sync |
+
+> **Keep Live Trading Mode off** when using a Pie. The collector's live execution places
+> raw market orders that bypass the Pie and can leave it out of sync with your actual positions.
+
+### Ongoing rebalance workflow
+
+1. Collector snapshot fires at 20:00 weekdays — drift builds up over time
+2. When `sensor.rebalance_signal` = `1`, an HA notification arrives with the reason and
+   suggested trade directions
+3. Open the **Rebalance** dashboard tab — review the suggested trade plan to understand
+   which groups and holdings need trimming or topping up
+4. Open T212 → your Pie → **Rebalance** — T212 executes all the trades automatically
+5. Once settled, press **Sync Holdings from T212** on the dashboard — updates all
+   quantities and average prices across every holding
+6. Press **Run Snapshot Now** — clears the rebalance signal and resets the baseline
+
+### After any Pie change (adding/removing ETFs, adjusting %)
+
+1. Make the changes to your Pie in T212 and let it rebalance
+2. **Sync Holdings from T212** — picks up new ETFs, removes sold ones, refreshes cost basis
+3. **Run Snapshot Now**
+
+New ETFs found in T212 that match the built-in defaults are auto-assigned the correct group.
+Genuinely new ETFs (not in the default list) are assigned `global_beta` — edit the group
+in the add-on Configuration tab if needed.
+
+---
+
 ## Guard-rails configuration
 
 | Option | Default | Description |
