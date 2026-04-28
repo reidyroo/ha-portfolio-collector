@@ -4,6 +4,63 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [1.6.6] — 2026-04-28
+
+### Fixed
+- **T212 compact ticker format for ISA accounts** — T212 ISA accounts use a
+  different ticker encoding from the classic `_EQ_XLON` format seen in the
+  API documentation:
+  - `VWRLl_EQ` — single lowercase letter (`l` = London) before `_EQ`
+  - `IWFM_EQ` / `IITU_EQ` — bare `_EQ` with no exchange letter
+
+  Neither format was in `_T212_EXCHANGE_MAP`, so `_t212_ticker_to_yahoo()`
+  fell through to the `rsplit("_", 1)` fallback and produced symbols like
+  `VWRLl` and `IWFM` (no `.L` suffix).  All holdings were then treated as
+  unknown instruments and assigned `global_beta`.
+
+  **Fix**: two new entries appended to `_T212_EXCHANGE_MAP` (after all classic
+  `_EQ_XXXX` entries so they only catch what's left):
+  - `("l_EQ", ".L")` — compact LSE with exchange letter
+  - `("_EQ",  ".L")` — compact LSE without exchange letter
+
+  Both also added to `_T212_PENCE_EXCHANGES` so prices are correctly
+  divided by 100 for these instruments.
+
+  **Recovery**: run **Sync Holdings from T212** once after deploying.  The
+  existing `yahoo_symbol` auto-correction and group auto-correction in the sync
+  endpoint will fix all holdings in a single pass.
+
+---
+
+## [1.6.5] — 2026-04-28
+
+### Fixed
+- **T212 ISA account ticker format** — ISA accounts append `I` to the base
+  instrument symbol (`VWRL_EQ_XLON` → `VWRLI_EQ_XLON`).  Previously the sync
+  treated every ISA holding as an unknown new instrument, derived incorrect Yahoo
+  symbols (`VWRLI.L`), and assigned every holding to `global_beta`.
+
+  Changes:
+  - `_normalise_t212_ticker()` — strips trailing `I` from `_EQ_XLON` base
+    symbols; used internally before any ticker→Yahoo derivation or group lookup.
+  - `_t212_ticker_to_yahoo()` — now calls `_normalise_t212_ticker` first so
+    `VWRLI_EQ_XLON` correctly maps to `VWRL.L`.
+  - `build_snapshot()` — `t212_by_ticker` now indexes each position under both
+    its raw ticker (`VWRLI_EQ_XLON`) and its normalised form (`VWRL_EQ_XLON`)
+    so price/quantity lookups work regardless of which format the config holds.
+  - `sync_from_t212()` — three-layer matching: (1) exact `t212_ticker` match,
+    (2) `yahoo_symbol` fallback for ISA format changes or previous bad syncs,
+    (3) treat as new if neither matches.  On every match the stored `t212_ticker`
+    is updated to the current T212 format, `yahoo_symbol` is corrected if stale,
+    and a `global_beta` group is auto-corrected using DEFAULT_HOLDINGS if the
+    holding is a known ETF with a different canonical group.
+
+  **Recovery**: after deploying v1.6.5, run **Sync Holdings from T212** once.
+  All holdings will be rematched via `yahoo_symbol`, tickers updated to ISA
+  format, Yahoo symbols corrected, and groups restored to their correct values.
+
+---
+
 ## [1.6.4] — 2026-04-28
 
 ### Fixed
