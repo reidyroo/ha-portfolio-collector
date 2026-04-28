@@ -5,7 +5,7 @@ description: >
   MSCI World / S&P 500 / FTSE 100 / DOW / VIX, and suggests rebalance
   trades for manual approval. Demo-first: safe to use before enabling
   live execution.
-version: "1.6.1"
+version: "1.6.4"
 slug: portfolio_collector
 init: false
 url: "https://github.com/YOUR_GITHUB_USERNAME/ha-portfolio-collector"
@@ -152,6 +152,7 @@ schema:
       purchase_price: float
       purchase_qty: float
       group: str?
+      instrument_name: str?
 
 panel_icon: mdi:chart-line
 panel_title: Portfolio

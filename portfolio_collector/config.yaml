@@ -5,7 +5,7 @@ description: >
   MSCI World / S&P 500 / FTSE 100 / DOW / VIX, and suggests rebalance
   trades for manual approval. Demo-first: safe to use before enabling
   live execution.
-version: "1.4.0"
+version: "1.6.4"
 slug: portfolio_collector
 init: false
 url: "https://github.com/YOUR_GITHUB_USERNAME/ha-portfolio-collector"
@@ -36,6 +36,12 @@ options:
   vix_high_threshold: 25
   vix_extreme_threshold: 35
   min_days_between_rebalance: 21
+
+  # Portfolio phase — selects a preset bundle of guard-rails and group allocations.
+  # Valid values: "Momentum-Max" | "Momentum-Chill" | "Balanced Growth" | "Pre-Retirement"
+  # Set to any other string (e.g. "Custom") to use the individual settings below.
+  # The HA dashboard phase selector writes this value automatically.
+  portfolio_phase: "Momentum-Max"
 
   # Group-based weight derivation (optional)
   # If true, individual target weights are derived from group allocations instead
@@ -135,6 +141,7 @@ schema:
   vix_high_threshold: int
   vix_extreme_threshold: int
   min_days_between_rebalance: int
+  portfolio_phase: str
   use_group_weights: bool
   max_cvar_pct: float
   cost_rate_pct: float
@@ -145,6 +152,7 @@ schema:
       purchase_price: float
       purchase_qty: float
       group: str?
+      instrument_name: str?
 
 panel_icon: mdi:chart-line
 panel_title: Portfolio
