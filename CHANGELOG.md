@@ -4,6 +4,64 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [1.6.4] — 2026-04-28
+
+### Fixed
+- **GBp pence→GBP conversion for T212 API prices** — T212's portfolio endpoint
+  returns LSE (`_EQ_XLON`) instrument prices in pence (GBp), not pounds.
+  The previous code assumed T212 converted to account currency; it does not.
+  Added `_t212_price_to_gbp()` helper and applied it in three places:
+  - `build_snapshot()` — `currentPrice` and `averagePrice` from T212 now
+    divided by 100 for LSE instruments before computing market value, cost
+    basis, and P&L. Fixes portfolio balance showing ~100× correct value.
+  - `sync_from_t212()` total-value calculation — weights derived during sync
+    now use pound prices (was pence but cancelled out in the ratio; fixed
+    for correctness).
+  - `sync_from_t212()` per-position loop — `purchase_price` stored in
+    `options.json` is now always in GBP. Previously a sync would overwrite
+    correctly-entered GBP prices with raw pence values from T212.
+
+---
+
+## [1.6.3] — 2026-04-28
+
+### Added
+- **`_fetch_t212_instruments()`** helper — calls `GET /api/v0/equity/metadata/instruments`
+  once per sync or execute and returns a `{ticker: shortName}` lookup dict.
+- **`instrument_name` field on holdings** — populated automatically during
+  `POST /api/sync-from-t212` for both existing and new holdings. Stored in
+  `options.json` and visible in the HA add-on Configuration UI.
+- **Pre-order ticker validation** — `POST /api/approve?execute=true` now fetches
+  the instruments catalog once before placing any orders. If a ticker is absent
+  from the catalog (e.g. demo environment doesn't carry an LSE ETF), the order
+  is skipped with a clear log message pointing to `t212_base` as the likely
+  cause, rather than a cryptic 404 from T212.
+- `instrument_name: str?` added to `config.yaml` schema.
+
+---
+
+## [1.6.2] — 2026-04-27
+
+### Changed
+- **Default holdings** — replaced `XWEM.DE` with three LSE-listed thematic ETFs,
+  redistributing its ~6% momentum-core slot equally (~2% each):
+
+  | Removed | Added | Group | Target |
+  |---|---|---|:---:|
+  | XWEM.DE (XWEM_EQ_XETA) | SMGB.L (SMGB_EQ_XLON) | momentum_core | 2% |
+  | | IITU.L (IITU_EQ_XLON) | momentum_core | 2% |
+  | | AIAG.L (AIAG_EQ_XLON) | momentum_core | 2% |
+
+  The momentum_core group now has 5 ETFs (IWFM, XDEM, SMGB, IITU, AIAG).
+  Weights for new holdings are 0.0 until first purchase and T212 sync.
+
+- **`POST /api/sync-from-t212`** — new holdings are now auto-assigned a group
+  by looking up their `yahoo_symbol` in `DEFAULT_HOLDINGS` before falling back
+  to `global_beta`. SMGB.L, IITU.L, and AIAG.L will correctly receive
+  `group: momentum_core` automatically after the T212 sync.
+
+---
+
 ## [1.6.1] — 2026-04-25
 
 ### Added
