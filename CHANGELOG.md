@@ -4,6 +4,23 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [1.6.3] — 2026-04-28
+
+### Added
+- **`_fetch_t212_instruments()`** helper — calls `GET /api/v0/equity/metadata/instruments`
+  once per sync or execute and returns a `{ticker: shortName}` lookup dict.
+- **`instrument_name` field on holdings** — populated automatically during
+  `POST /api/sync-from-t212` for both existing and new holdings. Stored in
+  `options.json` and visible in the HA add-on Configuration UI.
+- **Pre-order ticker validation** — `POST /api/approve?execute=true` now fetches
+  the instruments catalog once before placing any orders. If a ticker is absent
+  from the catalog (e.g. demo environment doesn't carry an LSE ETF), the order
+  is skipped with a clear log message pointing to `t212_base` as the likely
+  cause, rather than a cryptic 404 from T212.
+- `instrument_name: str?` added to `config.yaml` schema.
+
+---
+
 ## [1.6.2] — 2026-04-27
 
 ### Changed

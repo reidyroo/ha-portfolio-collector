@@ -4,6 +4,140 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [1.6.3] — 2026-04-28
+
+### Added
+- **`_fetch_t212_instruments()`** helper — calls `GET /api/v0/equity/metadata/instruments`
+  once per sync or execute and returns a `{ticker: shortName}` lookup dict.
+- **`instrument_name` field on holdings** — populated automatically during
+  `POST /api/sync-from-t212` for both existing and new holdings. Stored in
+  `options.json` and visible in the HA add-on Configuration UI.
+- **Pre-order ticker validation** — `POST /api/approve?execute=true` now fetches
+  the instruments catalog once before placing any orders. If a ticker is absent
+  from the catalog (e.g. demo environment doesn't carry an LSE ETF), the order
+  is skipped with a clear log message pointing to `t212_base` as the likely
+  cause, rather than a cryptic 404 from T212.
+- `instrument_name: str?` added to `config.yaml` schema.
+
+---
+
+## [1.6.2] — 2026-04-27
+
+### Changed
+- **Default holdings** — replaced `XWEM.DE` with three LSE-listed thematic ETFs,
+  redistributing its ~6% momentum-core slot equally (~2% each):
+
+  | Removed | Added | Group | Target |
+  |---|---|---|:---:|
+  | XWEM.DE (XWEM_EQ_XETA) | SMGB.L (SMGB_EQ_XLON) | momentum_core | 2% |
+  | | IITU.L (IITU_EQ_XLON) | momentum_core | 2% |
+  | | AIAG.L (AIAG_EQ_XLON) | momentum_core | 2% |
+
+  The momentum_core group now has 5 ETFs (IWFM, XDEM, SMGB, IITU, AIAG).
+  Weights for new holdings are 0.0 until first purchase and T212 sync.
+
+- **`POST /api/sync-from-t212`** — new holdings are now auto-assigned a group
+  by looking up their `yahoo_symbol` in `DEFAULT_HOLDINGS` before falling back
+  to `global_beta`. SMGB.L, IITU.L, and AIAG.L will correctly receive
+  `group: momentum_core` automatically after the T212 sync.
+
+---
+
+## [1.6.1] — 2026-04-25
+
+### Added
+- **`Momentum-Chill` phase preset** — a fourth named phase derived directly from
+  the default 13-ETF portfolio's original target weights:
+
+  | Group | Allocation | Source holdings |
+  |---|:---:|---|
+  | Momentum Core | 30% | IWFM 14% + XDEM 10% + XWEM 6% |
+  | Global Beta | 28% | VWRL 18% + SSAC 10% |
+  | Regional Satellite | 22% | VUSA 8% + IMEU 6% + IJPN 4% + VFEM 4% |
+  | Defensive | 16% | VAGP 12% + IGLS 4% |
+  | Optional Factor | 4% | IWFQ 3% + MVOL 1% |
+
+  Guard-rails: CVaR 5.5%, cost filter 0.10%, cooldown 21d, VIX high 25.
+  Sits between Momentum-Max and Balanced Growth in aggression.
+- `Momentum-Chill` added to `input_select.portfolio_phase` options in
+  `packages/portfolio.yaml`.
+- `Momentum-Chill` case added to the Active Phase Settings dashboard card.
+
+---
+
+## [1.6.0] — 2026-04-25
+
+### Added
+- **Portfolio phase presets** — three named bundles that set group allocations,
+  CVaR limit, cost filter, rebalance cooldown, and VIX high threshold together:
+
+  | Phase | Momentum Core | Global Beta | Regional | Defensive | Optional | CVaR | Cost | Cooldown | VIX high |
+  |---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+  | Momentum-Max | 35% | 40% | 15% | 5% | 5% | 6.5% | 0.10% | 21d | 25 |
+  | Balanced Growth | 25% | 38% | 17% | 15% | 5% | 4.5% | 0.10% | 21d | 25 |
+  | Pre-Retirement | 10% | 33% | 12% | 35% | 10% | 3.0% | 0.20% | 28d | 20 |
+
+- **`POST /api/set-phase`** — accepts `{"phase": "Balanced Growth"}` and writes
+  `portfolio_phase` to `options.json`; the next snapshot picks up the full preset.
+- **`portfolio_phase` option** added to `config.yaml` (default: `"Momentum-Max"`).
+  Visible and editable in the HA add-on Configuration UI.
+- **`rest_command.set_portfolio_phase`** in `packages/portfolio.yaml` — sends the
+  current `input_select.portfolio_phase` state to the set-phase endpoint.
+- **Automation `portfolio_phase_change`** — fires automatically when the HA
+  dashboard phase selector changes; applies the preset and sends a persistent
+  notification reminding the user to trigger a new snapshot.
+- **Active Phase Settings card** on the Rebalance dashboard tab — shows the full
+  allocation table and guard-rail values for the currently active phase.
+- `phase` field added to `GET /api/health` response.
+
+### Changed
+- `load_config()` now reads `portfolio_phase` from options and applies the full
+  phase preset when a recognised phase name is selected. Individual `max_cvar_pct`,
+  `cost_rate_pct`, `min_days_between_rebalance`, `vix_high_threshold`, and
+  `group_allocations` options are overridden by the preset; set
+  `portfolio_phase` to a custom string (e.g. `"Custom"`) to use individual values.
+- Version bumped to `1.6.0` throughout.
+
+---
+
+## [1.5.0] — 2026-04-24
+
+### Added
+- **`POST /api/sync-from-t212`** — syncs the holdings list directly from the
+  live T212 portfolio API.
+  - **Existing holdings**: `purchase_qty` and `purchase_price` updated from
+    T212's `quantity` and `averagePrice`. `target_weight`, `group`, and
+    `yahoo_symbol` are preserved.
+  - **New holdings** (in T212 but absent from config): added automatically.
+    `target_weight` is set to the holding's actual current weight in the T212
+    portfolio so the config starts balanced. `group` defaults to `global_beta`.
+  - **Removed holdings** (in config but zero/absent in T212, i.e. sold):
+    dropped from the holdings list so they no longer affect rebalancing.
+  - The updated holdings list is written back to `/data/options.json`. Open
+    the add-on options page in HA to review and assign correct groups to any
+    newly discovered holdings.
+  - Add `?preview=true` for a dry-run that logs the diff without writing.
+- **`POST /api/sync-from-t212?preview=true`** — dry-run variant; returns the
+  same diff payload without touching `options.json`.
+- **`_t212_ticker_to_yahoo()`** helper — derives a Yahoo Finance symbol from
+  a T212 instrument ticker using a priority-ordered exchange suffix map
+  (covers LSE, XETRA, Euronext, Nasdaq Nordic, NYSE, NASDAQ, and NYSE Arca).
+- **Dashboard: Sync buttons** — two new buttons on the Rebalance tab:
+  *Sync Holdings from T212* (writes) and *Preview T212 Sync* (dry-run).
+  Both have confirmation dialogs with instructions on assigning groups.
+- **`rest_command.sync_portfolio_from_t212`** and
+  **`rest_command.preview_t212_sync`** wired in `packages/portfolio.yaml`.
+- **Holdings view responsive layout** — Holdings tab changed from
+  `type: panel` + fixed `type: grid` to `type: masonry` with `max_columns: 2`.
+  Renders as two columns on desktop and a single column on mobile.
+
+### Changed
+- `_read_options()` now uses a module-level `OPTIONS_PATH` constant.
+- `_write_options()` helper added for safe write-back to `options.json`.
+- Version bumped to `1.5.0` throughout.
+
+---
+
 ## [1.4.0] — 2026-04-22
 
 ### Added

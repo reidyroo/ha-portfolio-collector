@@ -207,7 +207,7 @@ BENCHMARKS = {
     "vix":        "^VIX",
 }
 
-app = FastAPI(title="Portfolio Collector", version="1.6.2")
+app = FastAPI(title="Portfolio Collector", version="1.6.3")
 
 
 # ── Options / config loader ───────────────────────────────────────────────────
@@ -290,12 +290,13 @@ def load_config() -> dict:
     for h in holdings_raw[:20]:   # hard cap at 20
         sym = h["yahoo_symbol"].strip()
         holdings.append({
-            "yahoo_symbol":   sym,
-            "t212_ticker":    h["t212_ticker"].strip(),
-            "target_weight":  float(h["target_weight"]) / total * 100,
-            "purchase_price": float(h.get("purchase_price", 0)),
-            "purchase_qty":   float(h.get("purchase_qty", 0)),
-            "group":          h.get("group") or _default_group_map.get(sym, "global_beta"),
+            "yahoo_symbol":    sym,
+            "t212_ticker":     h["t212_ticker"].strip(),
+            "target_weight":   float(h["target_weight"]) / total * 100,
+            "purchase_price":  float(h.get("purchase_price", 0)),
+            "purchase_qty":    float(h.get("purchase_qty", 0)),
+            "group":           h.get("group") or _default_group_map.get(sym, "global_beta"),
+            "instrument_name": h.get("instrument_name", ""),
         })
 
     # ── Phase preset — drives group allocations and all guard-rail settings ──────
@@ -453,6 +454,34 @@ def _fallback_positions(cfg: dict) -> list:
         }
         for sym in cfg["target_weights"]
     ]
+
+
+def _fetch_t212_instruments(cfg: dict) -> dict[str, str]:
+    """Fetch all available instruments from T212 and return {ticker: shortName}.
+
+    Rate limit: 1 request per 50 seconds — call once per sync/execute, not per order.
+    Returns an empty dict on failure so callers can degrade gracefully.
+    """
+    if not cfg["t212_token"]:
+        return {}
+    try:
+        r = requests.get(
+            f"{cfg['t212_base']}/api/v0/equity/metadata/instruments",
+            headers=_t212_headers(cfg),
+            timeout=30,
+        )
+        r.raise_for_status()
+        instruments = r.json()
+        result = {
+            inst["ticker"]: inst.get("shortName", inst.get("name", inst["ticker"]))
+            for inst in instruments
+            if inst.get("ticker")
+        }
+        log.info(f"T212 instruments catalog: {len(result)} instruments")
+        return result
+    except Exception as exc:
+        log.warning(f"T212 instruments fetch failed (names unavailable): {exc}")
+        return {}
 
 
 def place_market_order(cfg: dict, t212_ticker: str, quantity: float) -> dict:
@@ -1015,7 +1044,7 @@ def health():
         "demo_mode":   "demo" in cfg.get("t212_base", "demo"),
         "holdings":    len(cfg.get("holdings", DEFAULT_HOLDINGS)),
         "phase":       cfg.get("portfolio_phase", "Momentum-Max"),
-        "version":     "1.6.2",
+        "version":     "1.6.3",
     }
 
 
@@ -1063,10 +1092,26 @@ def approve_rebalance(as_of: str, execute: bool = False):
     if execute:
         cfg     = load_config()
         actions = json.loads(row["suggested_actions"] or "[]")
+        # Fetch instrument catalog once — validates each ticker exists in this
+        # environment (demo vs live may differ) before submitting any orders.
+        instruments_map = _fetch_t212_instruments(cfg)
+        valid_tickers   = set(instruments_map.keys()) if instruments_map else None
         for action in actions:
-            result = place_market_order(cfg, action["t212_ticker"], action["delta_units"])
+            ticker = action["t212_ticker"]
+            if valid_tickers is not None and ticker not in valid_tickers:
+                result = {
+                    "error":  "ticker_not_found",
+                    "detail": (
+                        f"{ticker} not found in T212 instruments catalog for "
+                        f"{cfg['t212_base']} — order skipped. "
+                        "Check t212_base (demo vs live) in add-on options."
+                    ),
+                }
+                log.warning(f"Order skipped — {ticker} not in instruments catalog ({cfg['t212_base']})")
+            else:
+                result = place_market_order(cfg, ticker, action["delta_units"])
             execution_results.append({"action": action, "result": result})
-            log.info(f"Order: {action['action']} {action['delta_units']} {action['t212_ticker']} → {result}")
+            log.info(f"Order: {action['action']} {action['delta_units']} {ticker} → {result}")
         conn.execute("UPDATE snapshots SET executed=1, executed_at=? WHERE as_of=?",
                      (datetime.now(timezone.utc).isoformat(), as_of))
         conn.commit()
@@ -1178,6 +1223,9 @@ def sync_from_t212(preview: bool = False):
 
     log.info(f"T212 sync: {len(t212_positions)} position(s) from API")
 
+    # ── Fetch instrument catalog for name lookup and ticker validation ─────
+    instruments_map = _fetch_t212_instruments(cfg)
+
     # ── Calculate total portfolio value for weight derivation ─────────────────
     # Uses currentPrice if available, falls back to averagePrice.
     total_value = sum(
@@ -1214,8 +1262,11 @@ def sync_from_t212(preview: bool = False):
             h = dict(existing_by_t212[t212_ticker])
             old_qty   = float(h.get("purchase_qty",   0))
             old_price = float(h.get("purchase_price", 0))
-            h["purchase_qty"]   = round(quantity, 6)
-            h["purchase_price"] = round(average_price, 4)
+            h["purchase_qty"]    = round(quantity, 6)
+            h["purchase_price"]  = round(average_price, 4)
+            # Refresh name from catalog if available (fills in blanks from older syncs)
+            if instruments_map:
+                h["instrument_name"] = instruments_map.get(t212_ticker, h.get("instrument_name", ""))
             new_holdings.append(h)
             qty_changed   = abs(old_qty   - quantity)      > 0.000001
             price_changed = abs(old_price - average_price) > 0.001
@@ -1242,12 +1293,13 @@ def sync_from_t212(preview: bool = False):
             auto_group   = _default_group_map.get(yahoo_sym, "global_beta")
             needs_review = auto_group == "global_beta" and yahoo_sym not in _default_group_map
             h = {
-                "yahoo_symbol":  yahoo_sym,
-                "t212_ticker":   t212_ticker,
-                "target_weight": actual_wt,   # start balanced at current weight
+                "yahoo_symbol":   yahoo_sym,
+                "t212_ticker":    t212_ticker,
+                "target_weight":  actual_wt,   # start balanced at current weight
                 "purchase_price": round(average_price, 4),
                 "purchase_qty":   round(quantity, 6),
                 "group":          auto_group,
+                "instrument_name": instruments_map.get(t212_ticker, ""),
             }
             new_holdings.append(h)
             added.append({
@@ -1332,6 +1384,6 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
 if __name__ == "__main__":
     init_db()
     cfg = load_config()
-    log.info(f"Portfolio Collector v1.6.2 — {len(cfg['target_weights'])} holdings — "
+    log.info(f"Portfolio Collector v1.6.3 — {len(cfg['target_weights'])} holdings — "
              f"DB: {DB_PATH} — T212: {cfg['t212_base']}")
     uvicorn.run(app, host="0.0.0.0", port=PORT)
