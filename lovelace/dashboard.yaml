@@ -348,6 +348,15 @@ views:
           confirmation:
             text: "Delete all snapshots collected today? Use this to remove corrupt data before running a corrected snapshot. This cannot be undone."
 
+      - type: button
+        name: Delete Corrupt Snapshots (>£10k)
+        icon: mdi:delete-sweep-outline
+        tap_action:
+          action: call-service
+          service: rest_command.delete_corrupt_snapshots
+          confirmation:
+            text: "Delete ALL snapshots with portfolio value over £10,000? This removes pence-price corrupt records across all dates. Cannot be undone."
+
 
   # ═══════════════════════════════════
   # View 4: Benchmark History

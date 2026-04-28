@@ -1169,27 +1169,77 @@ def list_snapshots(limit: int = 90):
     return [_row_to_dict(r) for r in rows]
 
 
-@app.delete("/api/snapshots")
-def delete_snapshots(date: str = ""):
-    """Delete all snapshots for a given date (YYYY-MM-DD, defaults to today).
+@app.get("/api/snapshots/summary")
+def snapshot_summary(limit: int = 90):
+    """Lightweight list of snapshots — just the key fields for auditing values.
 
-    Used to remove corrupt snapshots before a corrected snapshot is collected.
-    Example: DELETE /api/snapshots?date=2026-04-28
+    Returns newest-first: as_of, date, portfolio_value, invested_value, cash,
+    portfolio_return_pct, rebalance_needed.
+    Browse to /api/snapshots/summary to quickly spot corrupt values.
     """
-    if not date:
-        date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    # Validate format to avoid SQL injection via the LIKE pattern
-    try:
-        datetime.strptime(date, "%Y-%m-%d")
-    except ValueError:
-        raise HTTPException(400, f"Invalid date format '{date}' — expected YYYY-MM-DD")
     conn = get_db()
-    cur = conn.execute("DELETE FROM snapshots WHERE as_of LIKE ?", (f"{date}%",))
-    deleted = cur.rowcount
+    rows = conn.execute(
+        """SELECT as_of, portfolio_value, invested_value, cash,
+                  portfolio_return_pct, rebalance_needed
+           FROM snapshots ORDER BY as_of DESC LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    conn.close()
+    return [
+        {
+            "as_of":                r["as_of"],
+            "date":                 r["as_of"][:10],
+            "portfolio_value":      round(float(r["portfolio_value"] or 0), 2),
+            "invested_value":       round(float(r["invested_value"]  or 0), 2),
+            "cash":                 round(float(r["cash"]            or 0), 2),
+            "portfolio_return_pct": round(float(r["portfolio_return_pct"] or 0), 2),
+            "rebalance_needed":     bool(r["rebalance_needed"]),
+        }
+        for r in rows
+    ]
+
+
+@app.delete("/api/snapshots")
+def delete_snapshots(date: str = "", min_value: float = 0.0):
+    """Delete snapshots by date and/or minimum portfolio value.
+
+    Parameters (all optional — at least one should be supplied):
+      date      YYYY-MM-DD  Delete all snapshots on this date (defaults to today
+                            when min_value is also 0).
+      min_value float       Delete all snapshots whose portfolio_value exceeds
+                            this amount.  Use to bulk-remove pence-price corrupt
+                            records across all dates.
+
+    Examples:
+      DELETE /api/snapshots                         → delete today's snapshots
+      DELETE /api/snapshots?date=2026-04-27         → delete a specific date
+      DELETE /api/snapshots?min_value=10000         → delete all > £10,000
+      DELETE /api/snapshots?date=2026-04-27&min_value=10000  → both conditions
+    """
+    conn    = get_db()
+    deleted = 0
+
+    if min_value > 0:
+        cur      = conn.execute("DELETE FROM snapshots WHERE portfolio_value > ?", (min_value,))
+        deleted += cur.rowcount
+        log.info(f"Deleted {cur.rowcount} snapshot(s) with portfolio_value > £{min_value:,.2f}")
+
+    if date or min_value == 0:
+        # Default to today if no date given and no min_value filter
+        if not date:
+            date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        try:
+            datetime.strptime(date, "%Y-%m-%d")
+        except ValueError:
+            conn.close()
+            raise HTTPException(400, f"Invalid date format '{date}' — expected YYYY-MM-DD")
+        cur      = conn.execute("DELETE FROM snapshots WHERE as_of LIKE ?", (f"{date}%",))
+        deleted += cur.rowcount
+        log.info(f"Deleted {cur.rowcount} snapshot(s) for date {date}")
+
     conn.commit()
     conn.close()
-    log.info(f"Deleted {deleted} snapshot(s) for {date}")
-    return {"deleted": deleted, "date": date}
+    return {"deleted": deleted, "date": date or None, "min_value": min_value or None}
 
 
 @app.post("/api/collect")
