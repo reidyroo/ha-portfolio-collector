@@ -11,6 +11,8 @@ API endpoints
 GET  /api/health                     Liveness probe
 GET  /api/latest-snapshot            Latest data (consumed by HA REST sensors)
 GET  /api/snapshots?limit=N          History (default 90 records)
+GET  /api/snapshots?summary=true     Lightweight list: as_of + portfolio_value only
+DELETE /api/snapshots?date=YYYY-MM-DD  Delete all snapshots for a given date
 GET  /api/benchmarks?days=N          Benchmark history
 POST /api/collect                    Run a full snapshot now
 POST /api/approve/{as_of}            Approve rebalance; add ?execute=true to place orders
@@ -1012,7 +1014,7 @@ def health():
         "demo_mode":   "demo" in cfg.get("t212_base", "demo"),
         "holdings":    len(cfg.get("holdings", DEFAULT_HOLDINGS)),
         "phase":       cfg.get("portfolio_phase", "Momentum-Max"),
-        "version":     "1.6.1",
+        "version":     "1.6.2",
     }
 
 
@@ -1027,11 +1029,39 @@ def latest_snapshot():
 
 
 @app.get("/api/snapshots")
-def list_snapshots(limit: int = 90):
+def list_snapshots(limit: int = 90, summary: bool = False):
+    """
+    List snapshots. ?summary=true returns only as_of + portfolio_value (fast, no JSON parsing).
+    Use ?limit=N to control how many records are returned (default 90).
+    """
     conn = get_db()
+    if summary:
+        rows = conn.execute(
+            "SELECT as_of, portfolio_value FROM snapshots ORDER BY as_of DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        conn.close()
+        return [{"as_of": r["as_of"], "portfolio_value": round(r["portfolio_value"], 2)} for r in rows]
     rows = conn.execute("SELECT * FROM snapshots ORDER BY as_of DESC LIMIT ?", (limit,)).fetchall()
     conn.close()
     return [_row_to_dict(r) for r in rows]
+
+
+@app.delete("/api/snapshots")
+def delete_snapshots(date: str):
+    """
+    Delete all snapshots for a given date (YYYY-MM-DD).
+    Example: DELETE /api/snapshots?date=2026-04-28
+    """
+    conn = get_db()
+    result = conn.execute(
+        "DELETE FROM snapshots WHERE as_of LIKE ?", (f"{date}%",)
+    )
+    deleted = result.rowcount
+    conn.commit()
+    conn.close()
+    log.info(f"Deleted {deleted} snapshot(s) for date {date}")
+    return {"deleted": deleted, "date": date}
 
 
 @app.post("/api/collect")

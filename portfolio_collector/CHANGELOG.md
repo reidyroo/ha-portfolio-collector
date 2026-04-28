@@ -4,6 +4,18 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [1.6.2] — 2026-04-28
+
+### Added
+- **`GET /api/snapshots?summary=true`** — lightweight list returning only
+  `as_of` + `portfolio_value` for each snapshot; no JSON parsing overhead.
+  Use this to quickly spot corrupt/rogue values in history.
+- **`DELETE /api/snapshots?date=YYYY-MM-DD`** — delete all snapshots for a
+  given date. Useful for removing corrupt records caused by bad syncs or
+  data errors without needing direct database access.
+
+---
+
 ## [1.4.0] — 2026-04-22
 
 ### Added
