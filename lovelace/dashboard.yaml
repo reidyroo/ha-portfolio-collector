@@ -339,6 +339,15 @@ views:
           confirmation:
             text: Clear the cooldown timer? Use after a failed execution to allow an immediate retry.
 
+      - type: button
+        name: Delete Today's Snapshots
+        icon: mdi:delete-clock-outline
+        tap_action:
+          action: call-service
+          service: rest_command.delete_todays_snapshots
+          confirmation:
+            text: "Delete all snapshots collected today? Use this to remove corrupt data before running a corrected snapshot. This cannot be undone."
+
 
   # ═══════════════════════════════════
   # View 4: Benchmark History

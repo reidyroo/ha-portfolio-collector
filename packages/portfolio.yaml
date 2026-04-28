@@ -221,6 +221,12 @@ rest_command:
     content_type: "application/json"
     timeout: 10
 
+  delete_todays_snapshots:
+    url: "http://localhost:8000/api/snapshots"
+    method: DELETE
+    content_type: "application/json"
+    timeout: 10
+
   sync_portfolio_from_t212:
     url: "http://localhost:8000/api/sync-from-t212"
     method: POST
