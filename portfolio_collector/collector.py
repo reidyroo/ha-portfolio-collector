@@ -275,7 +275,7 @@ BENCHMARKS = {
     "vix":        "^VIX",
 }
 
-app = FastAPI(title="Portfolio Collector", version="1.6.7")
+app = FastAPI(title="Portfolio Collector", version="1.6.8")
 
 
 # ── Options / config loader ───────────────────────────────────────────────────
@@ -632,9 +632,11 @@ def _to_gbp(yahoo_price: float, symbol: str, avg_price_gbp: float, eurgbp: float
     """
     Normalise a Yahoo Finance price to GBP.
 
-    LSE (.L) securities: Yahoo returns pence (GBp).  We detect this by
-    comparing against the known GBP cost-basis: if the Yahoo price is
-    more than 50× the GBP avg price it must be in pence → divide by 100.
+    LSE (.L) securities: Yahoo Finance consistently returns prices in pence (GBp).
+    We use a fixed threshold of 200: any price above £200 as GBP is implausibly
+    high for a typical ETF/stock unit, so values > 200 are treated as pence and
+    divided by 100.  This avoids the previous avg_price-based heuristic which
+    failed when avg_price was itself corrupted (e.g. stored in pence by a bad sync).
 
     Xetra (.DE) securities: Yahoo returns EUR → multiply by EUR/GBP rate.
 
@@ -642,7 +644,7 @@ def _to_gbp(yahoo_price: float, symbol: str, avg_price_gbp: float, eurgbp: float
     instruments held in a GBP account where T212 handles conversion).
     """
     if symbol.endswith(".L"):
-        if avg_price_gbp > 0 and yahoo_price > avg_price_gbp * 50:
+        if yahoo_price > 200.0:
             log.debug(f"{symbol}: pence detected ({yahoo_price:.1f}p) → £{yahoo_price/100:.2f}")
             return yahoo_price / 100.0
     elif symbol.endswith(".DE"):
@@ -841,22 +843,28 @@ def compute_snapshot() -> dict:
     cash = float(cash_data.get("free", 0.0))
     total_value += cash
 
-    # ── Use T212's reported total as the authoritative portfolio value ────────
-    # T212's account/cash endpoint returns the exact value shown in the T212 UI,
-    # accounting for spreads, rounding, and any uninvested dividends.
-    # If available, use it as portfolio_value and log the discrepancy vs our
-    # computed total (useful for diagnosing price-source drift).
+    # ── T212 account total — for display and diagnostics only ────────────────
+    # Read T212's reported account total from account/cash and log the delta
+    # vs our computed total so price-source drift is visible in the logs.
+    #
+    # IMPORTANT: we do NOT override total_value here.  On demo accounts the
+    # "total" field includes virtual starting cash (often £50k–£500k), which
+    # would inflate the denominator and make all actual_wt appear near-zero.
+    # The computed total_value (sum of position market values + free cash) is
+    # used for all weight/drift calculations and stored as portfolio_value.
     t212_total = float(cash_data.get("total", 0.0))
     if t212_total > 0:
         discrepancy = total_value - t212_total
-        if abs(discrepancy) > 1.0:
+        if abs(discrepancy) > 5.0:
             log.warning(
-                f"Portfolio value discrepancy: computed £{total_value:.2f} vs "
-                f"T212 total £{t212_total:.2f} (diff £{discrepancy:+.2f})"
+                f"Portfolio value: computed £{total_value:.2f}  "
+                f"T212 reported £{t212_total:.2f}  diff £{discrepancy:+.2f}"
             )
         else:
-            log.info(f"Portfolio value: £{t212_total:.2f} (T212 total, diff £{discrepancy:+.2f})")
-        total_value = t212_total  # T212's number is ground truth
+            log.info(
+                f"Portfolio value: £{total_value:.2f} (T212 £{t212_total:.2f}, "
+                f"diff £{discrepancy:+.2f})"
+            )
 
     for p in positions:
         actual_wt      = p["market_value"] / total_value * 100 if total_value else 0.0
@@ -1147,7 +1155,7 @@ def health():
         "demo_mode":   "demo" in cfg.get("t212_base", "demo"),
         "holdings":    len(cfg.get("holdings", DEFAULT_HOLDINGS)),
         "phase":       cfg.get("portfolio_phase", "Momentum-Max"),
-        "version":     "1.6.7",
+        "version":     "1.6.8",
     }
 
 
@@ -1596,6 +1604,6 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
 if __name__ == "__main__":
     init_db()
     cfg = load_config()
-    log.info(f"Portfolio Collector v1.6.7 — {len(cfg['target_weights'])} holdings — "
+    log.info(f"Portfolio Collector v1.6.8 — {len(cfg['target_weights'])} holdings — "
              f"DB: {DB_PATH} — T212: {cfg['t212_base']}")
     uvicorn.run(app, host="0.0.0.0", port=PORT)

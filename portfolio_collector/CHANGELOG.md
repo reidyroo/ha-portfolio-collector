@@ -4,6 +4,28 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [1.6.8] — 2026-04-28
+
+### Fixed
+- **T212 account total no longer overrides weight denominator** — v1.6.7
+  introduced `total_value = t212_total` to make the headline balance match T212.
+  On demo accounts (and potentially live accounts with Pies or pending deposits)
+  the `total` field from `account/cash` includes virtual/uninvested cash far
+  exceeding the computed position value, causing all `actual_wt` to appear
+  near-zero (e.g. VWRL showing 0.2% instead of ~18%).  T212 total is now used
+  only for diagnostic logging; `total_value` (computed from positions + free
+  cash) continues to drive all weight, drift, and rebalance calculations.
+
+- **`_to_gbp()` pence detection no longer relies on avg_price** — the previous
+  heuristic (`yahoo_price > avg_price_gbp × 50`) failed silently when
+  `avg_price_gbp` was itself stored in pence by a bad sync (threshold became
+  100× too high, pence prices were passed through as GBP values).  Replaced
+  with a fixed threshold: `.L` Yahoo prices above £200 are treated as pence and
+  divided by 100.  All UK ETFs in this portfolio trade between 1,000–15,000p
+  (£10–£150) so the threshold is safe.
+
+---
+
 ## [1.6.7] — 2026-04-28
 
 ### Added
