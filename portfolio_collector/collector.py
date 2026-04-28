@@ -142,7 +142,16 @@ PHASE_SETTINGS: dict[str, dict] = {
 
 # ── T212 ticker → Yahoo Finance symbol mapping ────────────────────────────────
 # Ordered longest-suffix-first so more specific rules win.
+#
+# T212 uses two ticker encoding schemes depending on account type / API version:
+#   Classic (Invest):  VWRL_EQ_XLON  — full exchange code suffix
+#   Compact (ISA):     VWRLl_EQ      — single lowercase exchange letter before _EQ
+#                      IWFM_EQ       — no exchange letter (seen on some LSE instruments)
+#
+# The classic entries must appear before the compact entries so the more
+# specific suffix wins when both could match (e.g. _EQ_XLON before l_EQ/_EQ).
 _T212_EXCHANGE_MAP: list[tuple[str, str]] = [
+    # ── Classic format ────────────────────────────────────────────────────────
     ("_EQ_XLON", ".L"),    # London Stock Exchange
     ("_EQ_XETA", ".DE"),   # XETRA Germany
     ("_EQ_XAMS", ".AS"),   # Amsterdam (Euronext NL)
@@ -157,12 +166,44 @@ _T212_EXCHANGE_MAP: list[tuple[str, str]] = [
     ("_EQ_XNAS", ""),      # NASDAQ
     ("_EQ_ARCX", ""),      # NYSE Arca (US ETFs)
     ("_US_EQ",   ""),      # Generic US equity
+    # ── Compact format (ISA / newer API) ─────────────────────────────────────
+    # Single lowercase letter encodes the exchange before the _EQ suffix.
+    # Must come after all classic _EQ_XXXX entries so they take priority.
+    ("l_EQ",  ".L"),       # l = London (LSE)  e.g. VWRLl_EQ → VWRL.L
+    # Compact instruments with no exchange letter — seen on some LSE ETFs
+    # (e.g. IWFM_EQ, IITU_EQ).  Falls through here only if no other rule matched.
+    ("_EQ",   ".L"),       # bare _EQ → assume LSE for instruments in this portfolio
 ]
 
 VALID_GROUPS = list(GROUP_ORDER.keys())   # used for sync-from-t212 docs
 
 
-_T212_PENCE_EXCHANGES = {"_EQ_XLON"}  # LSE instruments quoted in pence (GBp) by T212 API
+# LSE instruments are quoted in pence (GBp) in the T212 API — all three
+# encoding formats for LSE are included so prices are divided by 100.
+_T212_PENCE_EXCHANGES = {"_EQ_XLON", "l_EQ", "_EQ"}
+
+# Exchanges where T212 ISA accounts append 'I' to the base ticker symbol.
+# e.g. VWRL_EQ_XLON (Invest) → VWRLI_EQ_XLON (ISA)
+# Note: compact-format ISA tickers use 'l_EQ' (handled by exchange map above)
+# rather than the 'I' suffix, so this only applies to classic-format tickers.
+_T212_ISA_EXCHANGES = {"_EQ_XLON"}
+
+
+def _normalise_t212_ticker(ticker: str) -> str:
+    """Strip the ISA 'I' suffix from a T212 ticker to get the Invest-account form.
+
+    T212 ISA accounts append 'I' to the instrument base for certain exchanges
+    (VWRLI_EQ_XLON, SSACI_EQ_XLON, …).  Normalising to the non-ISA form lets us
+    match against DEFAULT_HOLDINGS and derive the correct Yahoo Finance symbol.
+    The original ISA ticker is still stored in config so orders use the right format.
+    """
+    for suffix in _T212_ISA_EXCHANGES:
+        if ticker.endswith(suffix):
+            base = ticker[: -len(suffix)]
+            if base.endswith("I") and len(base) > 1:
+                return base[:-1] + suffix
+    return ticker
+
 
 def _t212_price_to_gbp(price: float, t212_ticker: str) -> float:
     """Convert a T212 API price to GBP.
@@ -187,11 +228,16 @@ def _t212_price_to_gbp(price: float, t212_ticker: str) -> float:
 def _t212_ticker_to_yahoo(t212_ticker: str) -> str:
     """Derive a Yahoo Finance symbol from a Trading 212 instrument ticker.
 
+    Normalises ISA tickers first (VWRLI_EQ_XLON → VWRL_EQ_XLON) so the
+    Yahoo symbol is always the standard non-ISA form.
+
     Examples:
         VWRL_EQ_XLON  → VWRL.L
+        VWRLI_EQ_XLON → VWRL.L   (ISA account form, 'I' stripped)
         XWEM_EQ_XETA  → XWEM.DE
         AAPL_US_EQ    → AAPL
     """
+    t212_ticker = _normalise_t212_ticker(t212_ticker)
     for t212_suffix, yahoo_suffix in _T212_EXCHANGE_MAP:
         if t212_ticker.endswith(t212_suffix):
             return t212_ticker[: -len(t212_suffix)] + yahoo_suffix
@@ -229,7 +275,7 @@ BENCHMARKS = {
     "vix":        "^VIX",
 }
 
-app = FastAPI(title="Portfolio Collector", version="1.6.4")
+app = FastAPI(title="Portfolio Collector", version="1.6.7")
 
 
 # ── Options / config loader ───────────────────────────────────────────────────
@@ -711,9 +757,20 @@ def compute_snapshot() -> dict:
     log.info(f"=== Snapshot started — {len(cfg['target_weights'])} holdings, "
              f"T212={cfg['t212_base']} ===")
 
-    raw_positions  = fetch_t212_portfolio(cfg)
-    cash_data      = fetch_t212_cash(cfg)
-    t212_by_ticker = {p["ticker"]: p for p in raw_positions if isinstance(p, dict)}
+    raw_positions = fetch_t212_portfolio(cfg)
+    cash_data     = fetch_t212_cash(cfg)
+
+    # Build ticker lookup indexed by both the raw T212 ticker AND its normalised
+    # (non-ISA) form so config tickers in either format resolve correctly.
+    # e.g. T212 returns VWRLI_EQ_XLON → indexed as both VWRLI_EQ_XLON and VWRL_EQ_XLON
+    t212_by_ticker: dict = {}
+    for p in raw_positions:
+        if isinstance(p, dict) and p.get("ticker"):
+            raw_tick  = p["ticker"]
+            norm_tick = _normalise_t212_ticker(raw_tick)
+            t212_by_ticker[raw_tick]  = p
+            if norm_tick != raw_tick:
+                t212_by_ticker[norm_tick] = p  # alternate key for non-ISA config tickers
 
     # Include EUR/GBP rate for any Xetra (.DE) holdings
     all_symbols = list(cfg["target_weights"].keys()) + list(BENCHMARKS.values()) + ["EURGBP=X"]
@@ -783,6 +840,23 @@ def compute_snapshot() -> dict:
 
     cash = float(cash_data.get("free", 0.0))
     total_value += cash
+
+    # ── Use T212's reported total as the authoritative portfolio value ────────
+    # T212's account/cash endpoint returns the exact value shown in the T212 UI,
+    # accounting for spreads, rounding, and any uninvested dividends.
+    # If available, use it as portfolio_value and log the discrepancy vs our
+    # computed total (useful for diagnosing price-source drift).
+    t212_total = float(cash_data.get("total", 0.0))
+    if t212_total > 0:
+        discrepancy = total_value - t212_total
+        if abs(discrepancy) > 1.0:
+            log.warning(
+                f"Portfolio value discrepancy: computed £{total_value:.2f} vs "
+                f"T212 total £{t212_total:.2f} (diff £{discrepancy:+.2f})"
+            )
+        else:
+            log.info(f"Portfolio value: £{t212_total:.2f} (T212 total, diff £{discrepancy:+.2f})")
+        total_value = t212_total  # T212's number is ground truth
 
     for p in positions:
         actual_wt      = p["market_value"] / total_value * 100 if total_value else 0.0
@@ -1073,7 +1147,7 @@ def health():
         "demo_mode":   "demo" in cfg.get("t212_base", "demo"),
         "holdings":    len(cfg.get("holdings", DEFAULT_HOLDINGS)),
         "phase":       cfg.get("portfolio_phase", "Momentum-Max"),
-        "version":     "1.6.4",
+        "version":     "1.6.7",
     }
 
 
@@ -1093,6 +1167,79 @@ def list_snapshots(limit: int = 90):
     rows = conn.execute("SELECT * FROM snapshots ORDER BY as_of DESC LIMIT ?", (limit,)).fetchall()
     conn.close()
     return [_row_to_dict(r) for r in rows]
+
+
+@app.get("/api/snapshots/summary")
+def snapshot_summary(limit: int = 90):
+    """Lightweight list of snapshots — just the key fields for auditing values.
+
+    Returns newest-first: as_of, date, portfolio_value, invested_value, cash,
+    portfolio_return_pct, rebalance_needed.
+    Browse to /api/snapshots/summary to quickly spot corrupt values.
+    """
+    conn = get_db()
+    rows = conn.execute(
+        """SELECT as_of, portfolio_value, invested_value, cash,
+                  portfolio_return_pct, rebalance_needed
+           FROM snapshots ORDER BY as_of DESC LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    conn.close()
+    return [
+        {
+            "as_of":                r["as_of"],
+            "date":                 r["as_of"][:10],
+            "portfolio_value":      round(float(r["portfolio_value"] or 0), 2),
+            "invested_value":       round(float(r["invested_value"]  or 0), 2),
+            "cash":                 round(float(r["cash"]            or 0), 2),
+            "portfolio_return_pct": round(float(r["portfolio_return_pct"] or 0), 2),
+            "rebalance_needed":     bool(r["rebalance_needed"]),
+        }
+        for r in rows
+    ]
+
+
+@app.delete("/api/snapshots")
+def delete_snapshots(date: str = "", min_value: float = 0.0):
+    """Delete snapshots by date and/or minimum portfolio value.
+
+    Parameters (all optional — at least one should be supplied):
+      date      YYYY-MM-DD  Delete all snapshots on this date (defaults to today
+                            when min_value is also 0).
+      min_value float       Delete all snapshots whose portfolio_value exceeds
+                            this amount.  Use to bulk-remove pence-price corrupt
+                            records across all dates.
+
+    Examples:
+      DELETE /api/snapshots                         → delete today's snapshots
+      DELETE /api/snapshots?date=2026-04-27         → delete a specific date
+      DELETE /api/snapshots?min_value=10000         → delete all > £10,000
+      DELETE /api/snapshots?date=2026-04-27&min_value=10000  → both conditions
+    """
+    conn    = get_db()
+    deleted = 0
+
+    if min_value > 0:
+        cur      = conn.execute("DELETE FROM snapshots WHERE portfolio_value > ?", (min_value,))
+        deleted += cur.rowcount
+        log.info(f"Deleted {cur.rowcount} snapshot(s) with portfolio_value > £{min_value:,.2f}")
+
+    if date or min_value == 0:
+        # Default to today if no date given and no min_value filter
+        if not date:
+            date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        try:
+            datetime.strptime(date, "%Y-%m-%d")
+        except ValueError:
+            conn.close()
+            raise HTTPException(400, f"Invalid date format '{date}' — expected YYYY-MM-DD")
+        cur      = conn.execute("DELETE FROM snapshots WHERE as_of LIKE ?", (f"{date}%",))
+        deleted += cur.rowcount
+        log.info(f"Deleted {cur.rowcount} snapshot(s) for date {date}")
+
+    conn.commit()
+    conn.close()
+    return {"deleted": deleted, "date": date or None, "min_value": min_value or None}
 
 
 @app.post("/api/collect")
@@ -1272,6 +1419,11 @@ def sync_from_t212(preview: bool = False):
     opts = _read_options()
     existing_holdings      = opts.get("holdings", DEFAULT_HOLDINGS)
     existing_by_t212: dict = {h["t212_ticker"]: h for h in existing_holdings}
+    # Secondary lookup by yahoo_symbol — catches ISA-ticker-format mismatches
+    # (e.g. config has VWRLI.L from a bad sync but correct match is VWRL.L)
+    existing_by_yahoo: dict = {h["yahoo_symbol"]: h for h in existing_holdings}
+    # Group map from DEFAULT_HOLDINGS for correcting mis-assigned global_beta
+    _default_group_map = {d["yahoo_symbol"]: d["group"] for d in DEFAULT_HOLDINGS}
 
     new_holdings: list = []
     updated:      list = []
@@ -1291,23 +1443,53 @@ def sync_from_t212(preview: bool = False):
             continue
         t212_seen.add(t212_ticker)
 
+        # Derive the correct yahoo symbol (ISA 'I' stripped by _t212_ticker_to_yahoo)
+        yahoo_sym = _t212_ticker_to_yahoo(t212_ticker)
+
+        # ── Match against existing holdings ───────────────────────────────────
+        # 1. Exact t212_ticker match (normal case after first correct sync)
+        # 2. yahoo_symbol match (handles ISA format change or corrupt previous sync)
         if t212_ticker in existing_by_t212:
-            # ── Known holding — preserve strategy fields, update cost basis ───
             h = dict(existing_by_t212[t212_ticker])
+            match_via = "t212_ticker"
+        elif yahoo_sym in existing_by_yahoo:
+            h = dict(existing_by_yahoo[yahoo_sym])
+            match_via = "yahoo_symbol"
+            log.info(f"  Sync matched {t212_ticker} via yahoo_symbol {yahoo_sym} "
+                     f"(was stored as {h['t212_ticker']})")
+        else:
+            h = None
+            match_via = None
+
+        if h is not None:
+            # ── Known holding — update cost basis, fix any stale metadata ─────
             old_qty   = float(h.get("purchase_qty",   0))
             old_price = float(h.get("purchase_price", 0))
-            h["purchase_qty"]    = round(quantity, 6)
-            h["purchase_price"]  = round(average_price, 4)
-            # Refresh name from catalog if available (fills in blanks from older syncs)
+            h["purchase_qty"]   = round(quantity, 6)
+            h["purchase_price"] = round(average_price, 4)
+            # Always write the current T212 ticker (picks up ISA format on first re-sync)
+            h["t212_ticker"]  = t212_ticker
+            # Correct yahoo_symbol if it was wrong (e.g. VWRLI.L → VWRL.L)
+            if h.get("yahoo_symbol") != yahoo_sym:
+                log.info(f"  Sync corrected yahoo_symbol: {h.get('yahoo_symbol')} → {yahoo_sym}")
+                h["yahoo_symbol"] = yahoo_sym
+            # Auto-correct group if it was wrongly assigned global_beta but DEFAULT_HOLDINGS
+            # says otherwise (e.g. after a bad sync that lost group info)
+            stored_group  = h.get("group", "global_beta")
+            correct_group = _default_group_map.get(yahoo_sym)
+            if stored_group == "global_beta" and correct_group and correct_group != "global_beta":
+                log.info(f"  Sync corrected group: {t212_ticker} global_beta → {correct_group}")
+                h["group"] = correct_group
+            # Refresh instrument name from catalog
             if instruments_map:
                 h["instrument_name"] = instruments_map.get(t212_ticker, h.get("instrument_name", ""))
             new_holdings.append(h)
             qty_changed   = abs(old_qty   - quantity)      > 0.000001
             price_changed = abs(old_price - average_price) > 0.001
-            if qty_changed or price_changed:
+            if qty_changed or price_changed or match_via == "yahoo_symbol":
                 updated.append({
                     "t212_ticker":  t212_ticker,
-                    "yahoo_symbol": h["yahoo_symbol"],
+                    "yahoo_symbol": yahoo_sym,
                     "old_qty":      round(old_qty,   6),
                     "new_qty":      round(quantity,  6),
                     "old_price":    round(old_price,     4),
@@ -1317,22 +1499,18 @@ def sync_from_t212(preview: bool = False):
                          f"qty {old_qty:.4f}→{quantity:.4f}  "
                          f"price {old_price:.4f}→{average_price:.4f}")
         else:
-            # ── New holding — derive yahoo symbol and calculate actual weight ─
-            yahoo_sym    = _t212_ticker_to_yahoo(t212_ticker)
+            # ── Genuinely new holding — set defaults ──────────────────────────
             market_value = quantity * current_price
             actual_wt    = round(market_value / total_value * 100, 2) if total_value else 0.0
-            # Use the group from DEFAULT_HOLDINGS if this is a known ETF, otherwise
-            # fall back to global_beta so the user only needs to edit truly unknown ones.
-            _default_group_map = {d["yahoo_symbol"]: d["group"] for d in DEFAULT_HOLDINGS}
             auto_group   = _default_group_map.get(yahoo_sym, "global_beta")
             needs_review = auto_group == "global_beta" and yahoo_sym not in _default_group_map
             h = {
-                "yahoo_symbol":   yahoo_sym,
-                "t212_ticker":    t212_ticker,
-                "target_weight":  actual_wt,   # start balanced at current weight
-                "purchase_price": round(average_price, 4),
-                "purchase_qty":   round(quantity, 6),
-                "group":          auto_group,
+                "yahoo_symbol":    yahoo_sym,
+                "t212_ticker":     t212_ticker,
+                "target_weight":   actual_wt,
+                "purchase_price":  round(average_price, 4),
+                "purchase_qty":    round(quantity, 6),
+                "group":           auto_group,
                 "instrument_name": instruments_map.get(t212_ticker, ""),
             }
             new_holdings.append(h)
@@ -1418,6 +1596,6 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
 if __name__ == "__main__":
     init_db()
     cfg = load_config()
-    log.info(f"Portfolio Collector v1.6.4 — {len(cfg['target_weights'])} holdings — "
+    log.info(f"Portfolio Collector v1.6.7 — {len(cfg['target_weights'])} holdings — "
              f"DB: {DB_PATH} — T212: {cfg['t212_base']}")
     uvicorn.run(app, host="0.0.0.0", port=PORT)
