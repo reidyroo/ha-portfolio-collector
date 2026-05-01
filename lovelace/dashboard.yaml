@@ -375,6 +375,13 @@ views:
             color: "#FF9800"
             stroke_width: 2
             fill_raw: zero
+            opacity: 0.15
+          - entity: sensor.portfolio_alpha_msci
+            name: vs MSCI World
+            color: "#2196F3"
+            stroke_width: 2
+            fill_raw: zero
+            opacity: 0.15
 
 
   # ═══════════════════════════════════
@@ -389,7 +396,7 @@ views:
         content: |
           ## Instrument Groups
 
-          Assign each holding to a group — groups drive the portfolio phase
+          Assign each holding to a group. Groups drive the portfolio phase
           allocations used for rebalance target weights.
 
           **New instruments** added to your T212 account appear automatically
@@ -401,7 +408,6 @@ views:
         tap_action:
           action: navigate
           navigation_path: /hassio/ingress/portfolio_collector
-            opacity: 0.15
           - entity: sensor.portfolio_alpha_msci
             name: vs MSCI World
             color: "#2196F3"
