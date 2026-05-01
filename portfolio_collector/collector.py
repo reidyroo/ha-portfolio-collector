@@ -208,12 +208,20 @@ def _base_symbol_from_ticker(ticker: str) -> str:
 def _t212_ticker_to_yahoo(t212_ticker: str) -> str:
     """Derive Yahoo Finance symbol from a T212 ticker using suffix matching.
     Fallback used when the instrument catalog is unavailable.
+    Handles canonical form (VWRL_EQ_XLON) and ISA compact form (VWRLl_EQ).
     """
     for t212_suffix, yahoo_suffix in _T212_EXCHANGE_MAP:
         if t212_ticker.endswith(t212_suffix):
             return t212_ticker[: -len(t212_suffix)] + yahoo_suffix
+    # ISA compact — lowercase letter encodes exchange before "_EQ"
+    # e.g. "VWRLl_EQ" → VWRL + l (London) → "VWRL.L"
+    if t212_ticker.endswith("l_EQ"):
+        return t212_ticker[:-4] + ".L"
+    # Generic fallback: strip trailing "_XX" suffix; apply base-symbol cleaner
+    # so that any remaining trailing lowercase exchange char is also removed.
     parts = t212_ticker.rsplit("_", 1)
-    return parts[0] if len(parts) == 2 else t212_ticker
+    base  = parts[0] if len(parts) == 2 else t212_ticker
+    return _base_symbol_from_ticker(base)
 
 
 def _derive_yahoo_symbol(instrument: dict) -> str:
@@ -1697,7 +1705,7 @@ if __name__ == "__main__":
     # and ensures the /groups page works behind the ingress proxy.
     ingress_path = os.getenv("INGRESS_PATH", "")
     log.info(
-        f"Portfolio Collector v2.0.0 — phase={cfg['portfolio_phase']} — "
+        f"Portfolio Collector v2.0.1 — phase={cfg['portfolio_phase']} — "
         f"DB: {DB_PATH} — T212: {cfg['t212_base']} — ingress={ingress_path or 'none'}"
     )
     uvicorn.run(app, host="0.0.0.0", port=PORT, root_path=ingress_path)
