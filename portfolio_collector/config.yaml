@@ -18,6 +18,8 @@ arch:
 startup: application
 boot: auto
 host_network: true    # Required so HA core can reach port 8000 via localhost
+ingress: true
+ingress_port: 8000
 
 map:
   - data:rw           # Persistent SQLite DB at /data/portfolio.db

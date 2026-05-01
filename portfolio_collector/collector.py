@@ -194,10 +194,15 @@ app = FastAPI(title="Portfolio Collector", version="2.0.0")
 # ── Ticker utilities ──────────────────────────────────────────────────────────
 
 def _base_symbol_from_ticker(ticker: str) -> str:
-    """Extract the bare trading symbol from a canonical T212 ticker.
+    """Extract the bare trading symbol from a T212 ticker (canonical or ISA compact).
     "VWRL_EQ_XLON" → "VWRL",  "XWEM_EQ_XETA" → "XWEM",  "AAPL_US_EQ" → "AAPL"
+    "VWRLl_EQ"     → "VWRL"   (ISA compact: strip trailing lowercase exchange code)
     """
-    return ticker.split("_")[0]
+    base = ticker.split("_")[0]
+    # Strip trailing lowercase letters added by ISA compact format (e.g. 'l' = London)
+    # ETF/stock base symbols are always uppercase, so this is safe.
+    stripped = base.rstrip("abcdefghijklmnopqrstuvwxyz")
+    return stripped if stripped else base
 
 
 def _t212_ticker_to_yahoo(t212_ticker: str) -> str:
@@ -389,15 +394,16 @@ def _seed_new_instruments(
             log.info(f"New instrument: {canonical} ({yahoo_sym}) — group=unassigned")
             added += 1
         else:
-            # Update yahoo_symbol / display_name if catalog improved them
-            conn.execute(
-                """UPDATE instrument_groups
-                   SET yahoo_symbol=?, display_name=?, updated_at=?
-                   WHERE t212_ticker=? AND (yahoo_symbol='' OR display_name='')""",
-                (yahoo_sym, display_name, now, canonical),
-            )
-    if added:
-        conn.commit()
+            # Always refresh yahoo_symbol and display_name from catalog if catalog
+            # has data — corrects any bad values written before the catalog was populated.
+            if instrument:
+                conn.execute(
+                    """UPDATE instrument_groups
+                       SET yahoo_symbol=?, display_name=?, updated_at=?
+                       WHERE t212_ticker=?""",
+                    (yahoo_sym, display_name, now, canonical),
+                )
+    conn.commit()
     return added
 
 
@@ -1307,7 +1313,7 @@ _GROUPS_HTML = """<!DOCTYPE html>
      Changes save immediately.</p>
   <table>
     <thead>
-      <tr><th>Instrument</th><th>Yahoo</th><th>T212 Ticker</th><th>Group</th><th></th></tr>
+      <tr><th>Symbol</th><th>T212 Ticker</th><th>Group</th><th></th></tr>
     </thead>
     <tbody id="tbody">
       <tr><td colspan="5" style="text-align:center;color:#9ca3af;padding:2rem">Loading…</td></tr>
@@ -1358,8 +1364,7 @@ _GROUPS_HTML = """<!DOCTYPE html>
           const sid = stId(row.t212_ticker);
           const enc = encodeURIComponent(row.t212_ticker);
           return `<tr id="${rid}" class="${isNew ? 'unassigned-row' : ''}">
-            <td>${isNew ? '<span class="badge-new">NEW</span>' : ''}${row.display_name || row.yahoo_symbol}</td>
-            <td class="mono">${row.yahoo_symbol}</td>
+            <td class="mono">${isNew ? '<span class="badge-new">NEW</span>' : ''}${row.yahoo_symbol}</td>
             <td class="dim">${row.t212_ticker}</td>
             <td><select id="sel-${rid}" onchange="save('${enc}','${rid}','${sid}',this)">${opts}</select></td>
             <td><span class="st" id="${sid}"></span></td>
@@ -1687,8 +1692,12 @@ if __name__ == "__main__":
     init_db()
     _migrate_groups_from_options()
     cfg = load_config()
+    # HA Supervisor sets INGRESS_PATH env var when ingress is enabled.
+    # Passing it as root_path lets FastAPI generate correct absolute URLs
+    # and ensures the /groups page works behind the ingress proxy.
+    ingress_path = os.getenv("INGRESS_PATH", "")
     log.info(
         f"Portfolio Collector v2.0.0 — phase={cfg['portfolio_phase']} — "
-        f"DB: {DB_PATH} — T212: {cfg['t212_base']}"
+        f"DB: {DB_PATH} — T212: {cfg['t212_base']} — ingress={ingress_path or 'none'}"
     )
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    uvicorn.run(app, host="0.0.0.0", port=PORT, root_path=ingress_path)
