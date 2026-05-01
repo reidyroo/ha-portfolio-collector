@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portfolio Collector — Home Assistant Add-on v2.0.5
+Portfolio Collector — Home Assistant Add-on v2.0.6
 ===================================================
 Monitors a Trading 212 portfolio, computing drift from target weights,
 scoring momentum, benchmarking against major indices, and suggesting
@@ -188,7 +188,7 @@ _T212_EXCHANGE_MAP: list[tuple[str, str]] = [
     ("_US_EQ",   ""),
 ]
 
-app = FastAPI(title="Portfolio Collector", version="2.0.5")
+app = FastAPI(title="Portfolio Collector", version="2.0.6")
 
 
 # ── Ticker utilities ──────────────────────────────────────────────────────────
@@ -222,6 +222,36 @@ def _t212_ticker_to_yahoo(t212_ticker: str) -> str:
     parts = t212_ticker.rsplit("_", 1)
     base  = parts[0] if len(parts) == 2 else t212_ticker
     return _base_symbol_from_ticker(base)
+
+
+def _validate_yahoo_symbol(yahoo_sym: str, canonical_ticker: str, exchange: str = "") -> str:
+    """Ensure the Yahoo symbol carries the correct exchange suffix.
+
+    When the T212 catalog returns an instrument whose exchange field is blank or
+    unrecognised, _derive_yahoo_symbol may produce a bare symbol like "IITU"
+    instead of "IITU.L".  This function re-checks against the canonical ticker
+    suffix and the exchange code to add the missing suffix.
+
+    US instruments (NYSE/NASDAQ/Arca) legitimately have no suffix — they are
+    detected by the empty-string entry in _T212_EXCHANGE_MAP / _EXCHANGE_TO_YAHOO_SUFFIX.
+    """
+    if "." in yahoo_sym:
+        return yahoo_sym  # Already carries an exchange suffix — trust it
+
+    # 1. Try canonical ticker suffix (most reliable)
+    for t212_suffix, yf_suffix in _T212_EXCHANGE_MAP:
+        if canonical_ticker.endswith(t212_suffix):
+            if yf_suffix:          # non-empty → non-US listing, suffix required
+                return yahoo_sym + yf_suffix
+            else:                  # empty → US listing, no suffix needed
+                return yahoo_sym
+
+    # 2. Fall back to exchange code
+    if exchange in _EXCHANGE_TO_YAHOO_SUFFIX:
+        suffix = _EXCHANGE_TO_YAHOO_SUFFIX[exchange]
+        return yahoo_sym + suffix if suffix else yahoo_sym
+
+    return yahoo_sym
 
 
 def _derive_yahoo_symbol(instrument: dict) -> str:
@@ -416,7 +446,11 @@ def _seed_new_instruments(
         raw_ticker   = pos.get("ticker", "")
         canonical    = _normalize_isa_ticker(raw_ticker, catalog)
         instrument   = catalog.get(canonical, {})
-        yahoo_sym    = instrument.get("yahoo_symbol") or _t212_ticker_to_yahoo(canonical)
+        yahoo_sym    = _validate_yahoo_symbol(
+            instrument.get("yahoo_symbol") or _t212_ticker_to_yahoo(canonical),
+            canonical,
+            instrument.get("exchange", ""),
+        )
         display_name = instrument.get("name") or instrument.get("shortName") or yahoo_sym
 
         raw_val   = (
@@ -889,7 +923,7 @@ def _wma_trend_score(price_series: pd.Series, lookback: int = 126) -> float:
     s = price_series.dropna()
     if len(s) < lookback + 2:
         return 0.0
-    rets = s.pct_change().dropna().iloc[-lookback:]
+    rets = s.pct_change(fill_method=None).dropna().iloc[-lookback:]
     if len(rets) < 10:
         return 0.0
     vol = float(rets.std())
@@ -904,7 +938,7 @@ def _portfolio_cvar(weights_pct: dict, hist_df: pd.DataFrame, alpha: float = 0.9
     syms = [s for s in weights_pct if s in hist_df.columns and weights_pct.get(s, 0) > 0]
     if not syms:
         return 0.0
-    rets = hist_df[syms].pct_change().dropna()
+    rets = hist_df[syms].pct_change(fill_method=None).dropna()
     if len(rets) < 30:
         return 0.0
     w = np.array([weights_pct[s] for s in syms], dtype=float)
@@ -982,7 +1016,11 @@ def compute_snapshot() -> dict:
 
         canonical   = _normalize_isa_ticker(raw_ticker, catalog)
         instrument  = catalog.get(canonical, {})
-        yahoo_sym   = instrument.get("yahoo_symbol") or _t212_ticker_to_yahoo(canonical)
+        yahoo_sym   = _validate_yahoo_symbol(
+            instrument.get("yahoo_symbol") or _t212_ticker_to_yahoo(canonical),
+            canonical,
+            instrument.get("exchange", ""),
+        )
         currency_cc = instrument.get("currency_code", "GBP")
         display_nm  = instrument.get("name") or instrument.get("shortName") or yahoo_sym
 
@@ -1538,7 +1576,7 @@ def health():
     return {
         "status":           "ok",
         "utc":              datetime.now(timezone.utc).isoformat(),
-        "version":          "2.0.5",
+        "version":          "2.0.6",
         "t212_base":        opts.get("t212_base", "https://demo.trading212.com"),
         "demo_mode":        "demo" in opts.get("t212_base", "demo"),
         "phase":            opts.get("portfolio_phase", "Momentum-Max"),
@@ -1801,7 +1839,7 @@ if __name__ == "__main__":
     # and ensures the /groups page works behind the ingress proxy.
     ingress_path = os.getenv("INGRESS_PATH", "")
     log.info(
-        f"Portfolio Collector v2.0.5 — phase={cfg['portfolio_phase']} — "
+        f"Portfolio Collector v2.0.6 — phase={cfg['portfolio_phase']} — "
         f"DB: {DB_PATH} — T212: {cfg['t212_base']} — ingress={ingress_path or 'none'}"
     )
     uvicorn.run(app, host="0.0.0.0", port=PORT, root_path=ingress_path)
