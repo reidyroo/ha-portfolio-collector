@@ -42,7 +42,7 @@ import pandas as pd
 import requests
 import uvicorn
 import yfinance as yf
-from fastapi import Body, FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -188,7 +188,7 @@ _T212_EXCHANGE_MAP: list[tuple[str, str]] = [
     ("_US_EQ",   ""),
 ]
 
-app = FastAPI(title="Portfolio Collector", version="2.0.1")
+app = FastAPI(title="Portfolio Collector", version="2.0.2")
 
 
 # ── Ticker utilities ──────────────────────────────────────────────────────────
@@ -1415,9 +1415,14 @@ _GROUPS_HTML = """<!DOCTYPE html>
 # ── FastAPI routes ────────────────────────────────────────────────────────────
 
 @app.get("/")
-def root():
-    """Redirect sidebar panel to the groups management page."""
-    return RedirectResponse(url="/groups")
+def root(request: Request):
+    """Redirect sidebar / Open Web UI to the groups management page.
+    Must include root_path so the redirect stays within the HA ingress
+    URL space (e.g. /api/hassio_ingress/TOKEN/groups) rather than
+    bouncing to /groups on the HA host (404).
+    """
+    root_path = request.scope.get("root_path", "").rstrip("/")
+    return RedirectResponse(url=f"{root_path}/groups")
 
 
 @app.get("/api/health")
@@ -1442,7 +1447,7 @@ def health():
     return {
         "status":           "ok",
         "utc":              datetime.now(timezone.utc).isoformat(),
-        "version":          "2.0.1",
+        "version":          "2.0.2",
         "t212_base":        opts.get("t212_base", "https://demo.trading212.com"),
         "demo_mode":        "demo" in opts.get("t212_base", "demo"),
         "phase":            opts.get("portfolio_phase", "Momentum-Max"),
