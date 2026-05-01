@@ -4,98 +4,59 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
-## [1.6.1] — 2026-04-25
+## [2.0.0] — 2026-05-01
+
+### Changed — breaking
+- **T212 is now the source of truth.** The `holdings:` array has been removed
+  from `config.yaml`. Positions, quantities and prices are fetched live from
+  T212 on every snapshot. No manual holdings list is needed.
+- `POST /api/sync-from-t212` endpoint removed — auto-sync happens on every
+  `POST /api/collect`.
+- Snapshot now raises HTTP 503 (rather than using stale fallback data) when
+  the T212 API is unreachable.
 
 ### Added
-- **`Momentum-Chill` phase preset** — a fourth named phase derived directly from
-  the default 13-ETF portfolio's original target weights:
+- **Instrument catalog** — `GET /api/v0/equity/metadata/instruments` is fetched
+  from T212 and cached in SQLite (`instrument_catalog` table). Used to derive
+  Yahoo Finance symbols from exchange codes and to detect GBX (pence) instruments.
+- **Reliable pence handling** — uses `currencyCode == "GBX"` from the catalog
+  rather than heuristic price comparisons. Affects both T212 and Yahoo prices.
+- **ISA compact ticker resolution** — handles both `VWRLl_EQ` and `VWRL_EQ`
+  formats returned by T212 ISA accounts, resolving them to canonical tickers.
+- **Group labels in SQLite** — new `instrument_groups` table stores group
+  assignments. New instruments default to `unassigned` and trigger an HA
+  notification prompting assignment.
+- **Group manager UI** — FastAPI serves a HTML page at `/groups` (linked from
+  the HA sidebar ingress panel). Dropdowns auto-save on change.
+- **Snapshot sanity check** — new `max_snapshot_change_pct` option (default 20).
+  Snapshots whose portfolio value deviates by more than this percentage from the
+  previous snapshot are rejected and not written to the database.
+- **Phase change** — `POST /api/set-phase` now auto-enables `use_group_weights`
+  and resets the rebalance cooldown.
+- `GET /api/groups` — list all instrument group assignments.
+- `POST /api/groups/{ticker}` — update group label for an instrument.
+- `GET /api/catalog/status` — catalog cache info (age, TTL, instrument count).
+- `POST /api/catalog/refresh` — force catalog re-fetch bypassing TTL.
+- `catalog_cache_ttl_sec` config option (default 3600).
+- `unassigned_count` in snapshot response and `sensor.portfolio_value` attributes.
 
-  | Group | Allocation | Source holdings |
-  |---|:---:|---|
-  | Momentum Core | 30% | IWFM 14% + XDEM 10% + XWEM 6% |
-  | Global Beta | 28% | VWRL 18% + SSAC 10% |
-  | Regional Satellite | 22% | VUSA 8% + IMEU 6% + IJPN 4% + VFEM 4% |
-  | Defensive | 16% | VAGP 12% + IGLS 4% |
-  | Optional Factor | 4% | IWFQ 3% + MVOL 1% |
-
-  Guard-rails: CVaR 5.5%, cost filter 0.10%, cooldown 21d, VIX high 25.
-  Sits between Momentum-Max and Balanced Growth in aggression.
-- `Momentum-Chill` added to `input_select.portfolio_phase` options in
-  `packages/portfolio.yaml`.
-- `Momentum-Chill` case added to the Active Phase Settings dashboard card.
+### Migration from v1.6.x
+On first boot, `instrument_groups` is automatically seeded from any `holdings`
+array still in options.json (preserving group labels). Historical snapshots are
+untouched. The `holdings:` key in options.json is ignored by v2.0.0 and can be
+removed from the add-on Configuration UI.
 
 ---
 
-## [1.6.0] — 2026-04-25
+## [1.6.2] — 2026-04-28
 
 ### Added
-- **Portfolio phase presets** — three named bundles that set group allocations,
-  CVaR limit, cost filter, rebalance cooldown, and VIX high threshold together:
-
-  | Phase | Momentum Core | Global Beta | Regional | Defensive | Optional | CVaR | Cost | Cooldown | VIX high |
-  |---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-  | Momentum-Max | 35% | 40% | 15% | 5% | 5% | 6.5% | 0.10% | 21d | 25 |
-  | Balanced Growth | 25% | 38% | 17% | 15% | 5% | 4.5% | 0.10% | 21d | 25 |
-  | Pre-Retirement | 10% | 33% | 12% | 35% | 10% | 3.0% | 0.20% | 28d | 20 |
-
-- **`POST /api/set-phase`** — accepts `{"phase": "Balanced Growth"}` and writes
-  `portfolio_phase` to `options.json`; the next snapshot picks up the full preset.
-- **`portfolio_phase` option** added to `config.yaml` (default: `"Momentum-Max"`).
-  Visible and editable in the HA add-on Configuration UI.
-- **`rest_command.set_portfolio_phase`** in `packages/portfolio.yaml` — sends the
-  current `input_select.portfolio_phase` state to the set-phase endpoint.
-- **Automation `portfolio_phase_change`** — fires automatically when the HA
-  dashboard phase selector changes; applies the preset and sends a persistent
-  notification reminding the user to trigger a new snapshot.
-- **Active Phase Settings card** on the Rebalance dashboard tab — shows the full
-  allocation table and guard-rail values for the currently active phase.
-- `phase` field added to `GET /api/health` response.
-
-### Changed
-- `load_config()` now reads `portfolio_phase` from options and applies the full
-  phase preset when a recognised phase name is selected. Individual `max_cvar_pct`,
-  `cost_rate_pct`, `min_days_between_rebalance`, `vix_high_threshold`, and
-  `group_allocations` options are overridden by the preset; set
-  `portfolio_phase` to a custom string (e.g. `"Custom"`) to use individual values.
-- Version bumped to `1.6.0` throughout.
-
----
-
-## [1.5.0] — 2026-04-24
-
-### Added
-- **`POST /api/sync-from-t212`** — syncs the holdings list directly from the
-  live T212 portfolio API.
-  - **Existing holdings**: `purchase_qty` and `purchase_price` updated from
-    T212's `quantity` and `averagePrice`. `target_weight`, `group`, and
-    `yahoo_symbol` are preserved.
-  - **New holdings** (in T212 but absent from config): added automatically.
-    `target_weight` is set to the holding's actual current weight in the T212
-    portfolio so the config starts balanced. `group` defaults to `global_beta`.
-  - **Removed holdings** (in config but zero/absent in T212, i.e. sold):
-    dropped from the holdings list so they no longer affect rebalancing.
-  - The updated holdings list is written back to `/data/options.json`. Open
-    the add-on options page in HA to review and assign correct groups to any
-    newly discovered holdings.
-  - Add `?preview=true` for a dry-run that logs the diff without writing.
-- **`POST /api/sync-from-t212?preview=true`** — dry-run variant; returns the
-  same diff payload without touching `options.json`.
-- **`_t212_ticker_to_yahoo()`** helper — derives a Yahoo Finance symbol from
-  a T212 instrument ticker using a priority-ordered exchange suffix map
-  (covers LSE, XETRA, Euronext, Nasdaq Nordic, NYSE, NASDAQ, and NYSE Arca).
-- **Dashboard: Sync buttons** — two new buttons on the Rebalance tab:
-  *Sync Holdings from T212* (writes) and *Preview T212 Sync* (dry-run).
-  Both have confirmation dialogs with instructions on assigning groups.
-- **`rest_command.sync_portfolio_from_t212`** and
-  **`rest_command.preview_t212_sync`** wired in `packages/portfolio.yaml`.
-- **Holdings view responsive layout** — Holdings tab changed from
-  `type: panel` + fixed `type: grid` to `type: masonry` with `max_columns: 2`.
-  Renders as two columns on desktop and a single column on mobile.
-
-### Changed
-- `_read_options()` now uses a module-level `OPTIONS_PATH` constant.
-- `_write_options()` helper added for safe write-back to `options.json`.
-- Version bumped to `1.5.0` throughout.
+- **`GET /api/snapshots?summary=true`** — lightweight list returning only
+  `as_of` + `portfolio_value` for each snapshot; no JSON parsing overhead.
+  Use this to quickly spot corrupt/rogue values in history.
+- **`DELETE /api/snapshots?date=YYYY-MM-DD`** — delete all snapshots for a
+  given date. Useful for removing corrupt records caused by bad syncs or
+  data errors without needing direct database access.
 
 ---
 

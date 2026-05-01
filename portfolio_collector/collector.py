@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portfolio Collector — Home Assistant Add-on v2.0.0
+Portfolio Collector — Home Assistant Add-on v2.0.4
 ===================================================
 Monitors a Trading 212 portfolio, computing drift from target weights,
 scoring momentum, benchmarking against major indices, and suggesting
