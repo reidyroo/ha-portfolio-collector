@@ -188,7 +188,7 @@ _T212_EXCHANGE_MAP: list[tuple[str, str]] = [
     ("_US_EQ",   ""),
 ]
 
-app = FastAPI(title="Portfolio Collector", version="2.0.3")
+app = FastAPI(title="Portfolio Collector", version="2.0.4")
 
 
 # ── Ticker utilities ──────────────────────────────────────────────────────────
@@ -385,25 +385,26 @@ def _seed_new_instruments(
     catalog: dict,
     conn: sqlite3.Connection,
 ) -> int:
-    """Seed new positions into instrument_groups and refresh stale metadata.
+    """Seed new positions into instrument_groups and repair stale metadata.
 
-    For new instruments: inserts with group_label='unassigned' and stores
-    an approximate initial_weight_pct derived from current T212 prices so
-    that target weights mirror the actual portfolio on first install
-    (zero drift, no immediate rebalance).
-
-    For existing instruments: always refreshes yahoo_symbol and display_name
-    from the catalog/fallback — corrects IITU, IWFM and similar tickers that
-    were stored without the exchange suffix before the catalog was populated.
+    Per-instrument logic:
+      NEW instrument (not in DB at all)
+        → INSERT with group_label='unassigned', initial_weight_pct from T212.
+      EXISTS under canonical key (e.g. IITU_EQ_XLON)
+        → UPDATE yahoo_symbol/display_name always.
+        → UPDATE initial_weight_pct only if currently 0 (first run after 2.0.3).
+        → DELETE any stale compact-key duplicate (e.g. IITUl_EQ).
+      EXISTS only under compact key (e.g. IITUl_EQ, pre-catalog seed)
+        → MIGRATE: update t212_ticker → canonical, fix yahoo_symbol, set
+          initial_weight_pct if 0.  Group assignment is preserved.
 
     Returns the number of newly inserted rows.
     """
     now = datetime.now(timezone.utc).isoformat()
     added = 0
 
-    # Compute approximate portfolio weights from raw T212 data.
-    # Uses native-currency prices (not GBP-converted) — small error for
-    # cross-currency instruments, but good enough as initial targets.
+    # Approximate portfolio weights from raw T212 data (native currency).
+    # Small cross-currency error is acceptable for initial target storage.
     total_raw = sum(
         float(p.get("currentPrice") or p.get("averagePrice") or 0)
         * float(p.get("quantity") or 0)
@@ -418,17 +419,61 @@ def _seed_new_instruments(
         yahoo_sym    = instrument.get("yahoo_symbol") or _t212_ticker_to_yahoo(canonical)
         display_name = instrument.get("name") or instrument.get("shortName") or yahoo_sym
 
-        raw_val      = (
+        raw_val   = (
             float(pos.get("currentPrice") or pos.get("averagePrice") or 0)
             * float(pos.get("quantity") or 0)
         )
         approx_wt = round(raw_val / total_raw * 100, 2) if total_raw > 0 else 0.0
 
-        existing = conn.execute(
-            "SELECT 1 FROM instrument_groups WHERE t212_ticker=?", (canonical,)
+        # Look up by canonical key and (if different) by raw/compact key
+        row_c = conn.execute(
+            "SELECT initial_weight_pct FROM instrument_groups WHERE t212_ticker=?",
+            (canonical,),
         ).fetchone()
+        row_r = None
+        if canonical != raw_ticker:
+            row_r = conn.execute(
+                "SELECT initial_weight_pct, group_label FROM instrument_groups WHERE t212_ticker=?",
+                (raw_ticker,),
+            ).fetchone()
 
-        if not existing:
+        if row_c:
+            # ── Canonical key exists ─────────────────────────────────────────
+            # Always refresh symbol/name; set initial_weight_pct if still 0.
+            stored_wt = float(row_c["initial_weight_pct"] or 0)
+            new_wt    = approx_wt if stored_wt <= 0 else stored_wt
+            conn.execute(
+                """UPDATE instrument_groups
+                   SET yahoo_symbol=?, display_name=?, initial_weight_pct=?, updated_at=?
+                   WHERE t212_ticker=?""",
+                (yahoo_sym, display_name, new_wt, now, canonical),
+            )
+            # Remove stale compact-key duplicate if it exists
+            if row_r:
+                conn.execute(
+                    "DELETE FROM instrument_groups WHERE t212_ticker=?", (raw_ticker,)
+                )
+                log.info(f"Removed stale compact key '{raw_ticker}' (canonical='{canonical}')")
+
+        elif row_r:
+            # ── Only compact key found — migrate to canonical ────────────────
+            # Preserves the existing group assignment.
+            stored_wt = float(row_r["initial_weight_pct"] or 0)
+            new_wt    = approx_wt if stored_wt <= 0 else stored_wt
+            conn.execute(
+                """UPDATE instrument_groups
+                   SET t212_ticker=?, yahoo_symbol=?, display_name=?,
+                       initial_weight_pct=?, updated_at=?
+                   WHERE t212_ticker=?""",
+                (canonical, yahoo_sym, display_name, new_wt, now, raw_ticker),
+            )
+            log.info(
+                f"Migrated compact key: '{raw_ticker}' → '{canonical}' "
+                f"({yahoo_sym})  wt={new_wt:.1f}%"
+            )
+
+        else:
+            # ── Brand-new instrument ─────────────────────────────────────────
             conn.execute(
                 """INSERT OR IGNORE INTO instrument_groups
                    (t212_ticker, yahoo_symbol, display_name, group_label,
@@ -441,16 +486,7 @@ def _seed_new_instruments(
                 f"group=unassigned  initial_wt={approx_wt:.1f}%"
             )
             added += 1
-        else:
-            # Always refresh yahoo_symbol and display_name (catalog or fallback).
-            # This corrects stale values such as "IITU" → "IITU.L" that were
-            # written before the catalog was populated or before the l_EQ fix.
-            conn.execute(
-                """UPDATE instrument_groups
-                   SET yahoo_symbol=?, display_name=?, updated_at=?
-                   WHERE t212_ticker=?""",
-                (yahoo_sym, display_name, now, canonical),
-            )
+
     conn.commit()
     return added
 
@@ -1502,7 +1538,7 @@ def health():
     return {
         "status":           "ok",
         "utc":              datetime.now(timezone.utc).isoformat(),
-        "version":          "2.0.3",
+        "version":          "2.0.4",
         "t212_base":        opts.get("t212_base", "https://demo.trading212.com"),
         "demo_mode":        "demo" in opts.get("t212_base", "demo"),
         "phase":            opts.get("portfolio_phase", "Momentum-Max"),
