@@ -408,12 +408,6 @@ views:
         tap_action:
           action: navigate
           navigation_path: /hassio/ingress/portfolio_collector
-          - entity: sensor.portfolio_alpha_msci
-            name: vs MSCI World
-            color: "#2196F3"
-            stroke_width: 2
-            fill_raw: zero
-            opacity: 0.15
 
       - type: glance
         title: Returns Since Purchase (%)
