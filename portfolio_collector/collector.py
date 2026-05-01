@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portfolio Collector — Home Assistant Add-on v2.0.6
+Portfolio Collector — Home Assistant Add-on v2.0.7
 ===================================================
 Monitors a Trading 212 portfolio, computing drift from target weights,
 scoring momentum, benchmarking against major indices, and suggesting
@@ -188,7 +188,7 @@ _T212_EXCHANGE_MAP: list[tuple[str, str]] = [
     ("_US_EQ",   ""),
 ]
 
-app = FastAPI(title="Portfolio Collector", version="2.0.6")
+app = FastAPI(title="Portfolio Collector", version="2.0.7")
 
 
 # ── Ticker utilities ──────────────────────────────────────────────────────────
@@ -586,13 +586,15 @@ def _compute_target_weights(holdings: list, cfg: dict) -> dict[str, int]:
         fractional = _group_based_weights(holdings, cfg["group_allocations"])
     else:
         # Use initial T212 weights stored at first snapshot
-        stored = {h["yahoo_symbol"]: float(h.get("initial_weight_pct") or 0) for h in holdings}
-        total  = sum(stored.values())
-        if total > 10.0:
-            # Normalise to 100% (handles new instruments added after first snapshot)
+        stored     = {h["yahoo_symbol"]: float(h.get("initial_weight_pct") or 0) for h in holdings}
+        total      = sum(stored.values())
+        zero_count = sum(1 for w in stored.values() if w <= 0)
+        if total > 10.0 and zero_count == 0:
+            # All instruments have stored T212 weights — normalise and use them
             fractional = {sym: w / total * 100 for sym, w in stored.items()}
         else:
-            # No stored weights yet (very first collect) — equal weight fallback
+            # Some/all initial weights missing (DB migration pending or very first
+            # collect) — fall back to equal weight so no instrument gets 0% target
             fractional = {h["yahoo_symbol"]: 100.0 / n for h in holdings}
     return _round_weights_to_integers(fractional)
 
@@ -631,7 +633,9 @@ def load_config() -> dict:
         "vix_high_threshold":         cfg_vix_high,
         "vix_extreme_threshold":      float(opts.get("vix_extreme_threshold", 35)),
         "min_days_between_rebalance": cfg_cooldown,
-        "use_group_weights":          bool(opts.get("use_group_weights", False)),
+        # A named phase always implies group-based weight derivation.
+        # Only fall back to the stored flag when running a custom phase.
+        "use_group_weights":          True if preset else bool(opts.get("use_group_weights", False)),
         "max_cvar_pct":               cfg_max_cvar,
         "cost_rate_pct":              cfg_cost_rate,
         "group_allocations":          group_allocs,
@@ -1576,7 +1580,7 @@ def health():
     return {
         "status":           "ok",
         "utc":              datetime.now(timezone.utc).isoformat(),
-        "version":          "2.0.6",
+        "version":          "2.0.7",
         "t212_base":        opts.get("t212_base", "https://demo.trading212.com"),
         "demo_mode":        "demo" in opts.get("t212_base", "demo"),
         "phase":            opts.get("portfolio_phase", "Momentum-Max"),
@@ -1839,7 +1843,7 @@ if __name__ == "__main__":
     # and ensures the /groups page works behind the ingress proxy.
     ingress_path = os.getenv("INGRESS_PATH", "")
     log.info(
-        f"Portfolio Collector v2.0.6 — phase={cfg['portfolio_phase']} — "
+        f"Portfolio Collector v2.0.7 — phase={cfg['portfolio_phase']} — "
         f"DB: {DB_PATH} — T212: {cfg['t212_base']} — ingress={ingress_path or 'none'}"
     )
     uvicorn.run(app, host="0.0.0.0", port=PORT, root_path=ingress_path)
