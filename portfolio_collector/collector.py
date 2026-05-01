@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portfolio Collector — Home Assistant Add-on v2.0.7
+Portfolio Collector — Home Assistant Add-on v2.0.8
 ===================================================
 Monitors a Trading 212 portfolio, computing drift from target weights,
 scoring momentum, benchmarking against major indices, and suggesting
@@ -188,7 +188,7 @@ _T212_EXCHANGE_MAP: list[tuple[str, str]] = [
     ("_US_EQ",   ""),
 ]
 
-app = FastAPI(title="Portfolio Collector", version="2.0.7")
+app = FastAPI(title="Portfolio Collector", version="2.0.8")
 
 
 # ── Ticker utilities ──────────────────────────────────────────────────────────
@@ -633,9 +633,9 @@ def load_config() -> dict:
         "vix_high_threshold":         cfg_vix_high,
         "vix_extreme_threshold":      float(opts.get("vix_extreme_threshold", 35)),
         "min_days_between_rebalance": cfg_cooldown,
-        # A named phase always implies group-based weight derivation.
-        # Only fall back to the stored flag when running a custom phase.
-        "use_group_weights":          True if preset else bool(opts.get("use_group_weights", False)),
+        # Phase presets control guard-rails only (CVaR, VIX, cooldown, cost filter).
+        # Group weight derivation is a separate decision — controlled independently.
+        "use_group_weights":          bool(opts.get("use_group_weights", False)),
         "max_cvar_pct":               cfg_max_cvar,
         "cost_rate_pct":              cfg_cost_rate,
         "group_allocations":          group_allocs,
@@ -1580,7 +1580,7 @@ def health():
     return {
         "status":           "ok",
         "utc":              datetime.now(timezone.utc).isoformat(),
-        "version":          "2.0.7",
+        "version":          "2.0.8",
         "t212_base":        opts.get("t212_base", "https://demo.trading212.com"),
         "demo_mode":        "demo" in opts.get("t212_base", "demo"),
         "phase":            opts.get("portfolio_phase", "Momentum-Max"),
@@ -1686,8 +1686,12 @@ def reset_cooldown():
 
 @app.post("/api/set-phase")
 def set_phase(body: dict = Body(default={})):
-    """Apply a named portfolio phase preset.
-    Also auto-enables use_group_weights and resets the rebalance cooldown.
+    """Apply a named portfolio phase preset (guard-rails only).
+
+    Writes portfolio_phase to options.json and resets the rebalance cooldown.
+    Does NOT change use_group_weights — group weight derivation is an
+    independent decision controlled separately in the add-on configuration.
+
     Body: {"phase": "Momentum-Max"}
     """
     phase = body.get("phase", "").strip()
@@ -1697,24 +1701,24 @@ def set_phase(body: dict = Body(default={})):
         raise HTTPException(400, f"Unknown phase '{phase}'. Valid: {list(PHASE_SETTINGS.keys())}")
 
     opts = _read_options()
-    opts["portfolio_phase"]  = phase
-    opts["use_group_weights"] = True   # auto-enable on phase change
+    opts["portfolio_phase"] = phase
     try:
         _write_options(opts)
     except Exception as exc:
         raise HTTPException(500, f"Failed to write options.json: {exc}")
 
-    # Reset cooldown
+    # Reset cooldown so a rebalance can fire immediately after a phase change
     conn = get_db()
     n    = conn.execute("UPDATE snapshots SET executed=0, executed_at=NULL WHERE executed=1").rowcount
     conn.commit()
     conn.close()
 
     preset = PHASE_SETTINGS[phase]
+    ugw    = bool(opts.get("use_group_weights", False))
     log.info(f"Phase set to '{phase}': CVaR={preset['max_cvar_pct']}%  "
              f"cost={preset['cost_rate_pct']}%  cooldown={preset['min_days_between_rebalance']}d  "
-             f"vix_high={preset['vix_high_threshold']}  cooldown_reset={n} snapshots")
-    return {"phase": phase, "settings": preset, "use_group_weights": True, "cooldown_reset": n}
+             f"vix_high={preset['vix_high_threshold']}  use_group_weights={ugw}  cooldown_reset={n} snapshots")
+    return {"phase": phase, "settings": preset, "use_group_weights": ugw, "cooldown_reset": n}
 
 
 @app.get("/api/groups")
@@ -1843,7 +1847,7 @@ if __name__ == "__main__":
     # and ensures the /groups page works behind the ingress proxy.
     ingress_path = os.getenv("INGRESS_PATH", "")
     log.info(
-        f"Portfolio Collector v2.0.7 — phase={cfg['portfolio_phase']} — "
+        f"Portfolio Collector v2.0.8 — phase={cfg['portfolio_phase']} — "
         f"DB: {DB_PATH} — T212: {cfg['t212_base']} — ingress={ingress_path or 'none'}"
     )
     uvicorn.run(app, host="0.0.0.0", port=PORT, root_path=ingress_path)
