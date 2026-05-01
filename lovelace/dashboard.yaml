@@ -403,18 +403,11 @@ views:
           after the next snapshot and are tagged *Unassigned* until you assign them.
 
       - type: button
-        name: Open Group Manager (Ingress)
+        name: Open Group Manager
         icon: mdi:tag-edit-outline
         tap_action:
           action: navigate
-          navigation_path: /hassio/ingress/54e2df00_portfolio_collector
-
-      - type: button
-        name: Open Group Manager (Direct — local network)
-        icon: mdi:open-in-new
-        tap_action:
-          action: url
-          url_path: http://homeassistant.local:8000/groups
+          navigation_path: /portfolio_groups
 
       - type: glance
         title: Returns Since Purchase (%)

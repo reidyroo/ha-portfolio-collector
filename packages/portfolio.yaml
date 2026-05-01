@@ -5,6 +5,19 @@
 # Collector add-on runs on port 8000 on the same machine.
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# ── Groups Manager panel ─────────────────────────────────────────────────────
+# Embeds the collector's group-management page directly in the HA sidebar.
+# Uses the add-on's direct port (8000) — works without HA ingress registration.
+# If homeassistant.local doesn't resolve on your network, replace with your
+# HA box's local IP address (e.g. http://192.168.1.x:8000/groups).
+panel_iframe:
+  portfolio_groups:
+    title: "Portfolio Groups"
+    icon: mdi:tag-multiple-outline
+    url: "http://homeassistant.local:8000/groups"
+    require_admin: false
+
+
 # ── REST sensors — reads from collector add-on ───────────────────────────────
 rest:
   - resource: http://localhost:8000/api/latest-snapshot
@@ -132,7 +145,7 @@ input_select:
       - "Momentum-Chill"
       - "Balanced Growth"
       - "Pre-Retirement"
-    initial: "Momentum-Max"
+    initial: "Momentum-Chill"
     icon: mdi:tune-variant
 
 

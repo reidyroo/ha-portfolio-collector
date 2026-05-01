@@ -5,7 +5,7 @@ description: >
   scores momentum, benchmarks against MSCI World / S&P 500 / FTSE 100 / DOW / VIX,
   and suggests rebalance trades for manual approval. No holdings list required —
   T212 is the source of truth.
-version: "2.0.2"
+version: "2.0.3"
 slug: portfolio_collector
 init: false
 url: "https://github.com/YOUR_GITHUB_USERNAME/ha-portfolio-collector"
@@ -42,7 +42,7 @@ options:
   # Portfolio phase — selects a preset bundle of guard-rails and group allocations.
   # Valid values: "Momentum-Max" | "Momentum-Chill" | "Balanced Growth" | "Pre-Retirement"
   # Set to any other string (e.g. "Custom") to use the individual settings below.
-  portfolio_phase: "Momentum-Max"
+  portfolio_phase: "Momentum-Chill"
 
   # Group-based weight derivation
   # If true, individual target weights are derived from group allocations.

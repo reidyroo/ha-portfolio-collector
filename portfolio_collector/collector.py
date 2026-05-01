@@ -188,7 +188,7 @@ _T212_EXCHANGE_MAP: list[tuple[str, str]] = [
     ("_US_EQ",   ""),
 ]
 
-app = FastAPI(title="Portfolio Collector", version="2.0.2")
+app = FastAPI(title="Portfolio Collector", version="2.0.3")
 
 
 # ── Ticker utilities ──────────────────────────────────────────────────────────
@@ -315,13 +315,21 @@ def init_db():
         );
 
         CREATE TABLE IF NOT EXISTS instrument_groups (
-            t212_ticker     TEXT PRIMARY KEY,
-            yahoo_symbol    TEXT NOT NULL DEFAULT '',
-            display_name    TEXT NOT NULL DEFAULT '',
-            group_label     TEXT NOT NULL DEFAULT 'unassigned',
-            updated_at      TEXT NOT NULL
+            t212_ticker        TEXT PRIMARY KEY,
+            yahoo_symbol       TEXT NOT NULL DEFAULT '',
+            display_name       TEXT NOT NULL DEFAULT '',
+            group_label        TEXT NOT NULL DEFAULT 'unassigned',
+            initial_weight_pct REAL NOT NULL DEFAULT 0,
+            updated_at         TEXT NOT NULL
         );
     """)
+    # Migration: add initial_weight_pct to existing DBs that predate 2.0.3
+    try:
+        conn.execute("ALTER TABLE instrument_groups ADD COLUMN initial_weight_pct REAL NOT NULL DEFAULT 0")
+        conn.commit()
+        log.info("DB migration: added initial_weight_pct column to instrument_groups")
+    except Exception:
+        pass  # Column already exists — normal on fresh install or after first migration
     conn.commit()
     conn.close()
     log.info(f"Database ready: {DB_PATH}")
@@ -377,40 +385,72 @@ def _seed_new_instruments(
     catalog: dict,
     conn: sqlite3.Connection,
 ) -> int:
-    """Add any position not yet in instrument_groups with group_label='unassigned'.
-    Existing rows are left untouched. Returns the number of newly added rows.
+    """Seed new positions into instrument_groups and refresh stale metadata.
+
+    For new instruments: inserts with group_label='unassigned' and stores
+    an approximate initial_weight_pct derived from current T212 prices so
+    that target weights mirror the actual portfolio on first install
+    (zero drift, no immediate rebalance).
+
+    For existing instruments: always refreshes yahoo_symbol and display_name
+    from the catalog/fallback — corrects IITU, IWFM and similar tickers that
+    were stored without the exchange suffix before the catalog was populated.
+
+    Returns the number of newly inserted rows.
     """
-    now     = datetime.now(timezone.utc).isoformat()
-    added   = 0
+    now = datetime.now(timezone.utc).isoformat()
+    added = 0
+
+    # Compute approximate portfolio weights from raw T212 data.
+    # Uses native-currency prices (not GBP-converted) — small error for
+    # cross-currency instruments, but good enough as initial targets.
+    total_raw = sum(
+        float(p.get("currentPrice") or p.get("averagePrice") or 0)
+        * float(p.get("quantity") or 0)
+        for p in positions
+        if float(p.get("quantity") or 0) > 0
+    )
+
     for pos in positions:
-        raw_ticker  = pos.get("ticker", "")
-        canonical   = _normalize_isa_ticker(raw_ticker, catalog)
-        instrument  = catalog.get(canonical, {})
-        yahoo_sym   = instrument.get("yahoo_symbol") or _t212_ticker_to_yahoo(canonical)
+        raw_ticker   = pos.get("ticker", "")
+        canonical    = _normalize_isa_ticker(raw_ticker, catalog)
+        instrument   = catalog.get(canonical, {})
+        yahoo_sym    = instrument.get("yahoo_symbol") or _t212_ticker_to_yahoo(canonical)
         display_name = instrument.get("name") or instrument.get("shortName") or yahoo_sym
+
+        raw_val      = (
+            float(pos.get("currentPrice") or pos.get("averagePrice") or 0)
+            * float(pos.get("quantity") or 0)
+        )
+        approx_wt = round(raw_val / total_raw * 100, 2) if total_raw > 0 else 0.0
 
         existing = conn.execute(
             "SELECT 1 FROM instrument_groups WHERE t212_ticker=?", (canonical,)
         ).fetchone()
+
         if not existing:
             conn.execute(
                 """INSERT OR IGNORE INTO instrument_groups
-                   (t212_ticker, yahoo_symbol, display_name, group_label, updated_at)
-                   VALUES (?, ?, ?, 'unassigned', ?)""",
-                (canonical, yahoo_sym, display_name, now),
+                   (t212_ticker, yahoo_symbol, display_name, group_label,
+                    initial_weight_pct, updated_at)
+                   VALUES (?, ?, ?, 'unassigned', ?, ?)""",
+                (canonical, yahoo_sym, display_name, approx_wt, now),
             )
-            log.info(f"New instrument: {canonical} ({yahoo_sym}) — group=unassigned")
+            log.info(
+                f"New instrument: {canonical} ({yahoo_sym}) — "
+                f"group=unassigned  initial_wt={approx_wt:.1f}%"
+            )
             added += 1
         else:
-            # Always refresh yahoo_symbol and display_name from catalog if catalog
-            # has data — corrects any bad values written before the catalog was populated.
-            if instrument:
-                conn.execute(
-                    """UPDATE instrument_groups
-                       SET yahoo_symbol=?, display_name=?, updated_at=?
-                       WHERE t212_ticker=?""",
-                    (yahoo_sym, display_name, now, canonical),
-                )
+            # Always refresh yahoo_symbol and display_name (catalog or fallback).
+            # This corrects stale values such as "IITU" → "IITU.L" that were
+            # written before the catalog was populated or before the l_EQ fix.
+            conn.execute(
+                """UPDATE instrument_groups
+                   SET yahoo_symbol=?, display_name=?, updated_at=?
+                   WHERE t212_ticker=?""",
+                (yahoo_sym, display_name, now, canonical),
+            )
     conn.commit()
     return added
 
@@ -462,7 +502,12 @@ def _round_weights_to_integers(raw: dict[str, float]) -> dict[str, int]:
 
 def _compute_target_weights(holdings: list, cfg: dict) -> dict[str, int]:
     """Derive rounded integer target weights from the live holdings list.
-    Group-based if use_group_weights=True, otherwise equal-weight.
+
+    Priority order:
+      1. Group-based  — if use_group_weights=True and ≥1 holding is assigned
+      2. Stored T212  — initial_weight_pct captured at first snapshot (zero drift
+                        on fresh install; no rebalance until groups are assigned)
+      3. Equal weight — fallback when no stored weights exist yet
     """
     n = len(holdings)
     if n == 0:
@@ -470,7 +515,15 @@ def _compute_target_weights(holdings: list, cfg: dict) -> dict[str, int]:
     if cfg.get("use_group_weights") and any(h["group"] != "unassigned" for h in holdings):
         fractional = _group_based_weights(holdings, cfg["group_allocations"])
     else:
-        fractional = {h["yahoo_symbol"]: 100.0 / n for h in holdings}
+        # Use initial T212 weights stored at first snapshot
+        stored = {h["yahoo_symbol"]: float(h.get("initial_weight_pct") or 0) for h in holdings}
+        total  = sum(stored.values())
+        if total > 10.0:
+            # Normalise to 100% (handles new instruments added after first snapshot)
+            fractional = {sym: w / total * 100 for sym, w in stored.items()}
+        else:
+            # No stored weights yet (very first collect) — equal weight fallback
+            fractional = {h["yahoo_symbol"]: 100.0 / n for h in holdings}
     return _round_weights_to_integers(fractional)
 
 
@@ -480,7 +533,7 @@ def load_config() -> dict:
     the instrument_groups DB table, built inside compute_snapshot().
     """
     opts   = _read_options()
-    phase  = opts.get("portfolio_phase", "Momentum-Max")
+    phase  = opts.get("portfolio_phase", "Momentum-Chill")
     preset = PHASE_SETTINGS.get(phase)
 
     if preset:
@@ -897,22 +950,24 @@ def compute_snapshot() -> dict:
         currency_cc = instrument.get("currency_code", "GBP")
         display_nm  = instrument.get("name") or instrument.get("shortName") or yahoo_sym
 
-        group_row   = groups_db.get(canonical, {})
-        group_label = group_row.get("group_label", "unassigned")
+        group_row          = groups_db.get(canonical, {})
+        group_label        = group_row.get("group_label", "unassigned")
+        initial_weight_pct = float(group_row.get("initial_weight_pct") or 0)
 
         avg_price_raw = float(pos.get("averagePrice") or 0)
         cur_price_raw = float(pos.get("currentPrice") or avg_price_raw)
 
         holdings.append({
-            "yahoo_symbol":    yahoo_sym,
-            "t212_ticker":     canonical,
-            "raw_t212_ticker": raw_ticker,
-            "currency_code":   currency_cc,
-            "display_name":    display_nm,
-            "quantity":        quantity,
-            "avg_price_raw":   avg_price_raw,   # in instrument currency (may be pence)
-            "cur_price_raw":   cur_price_raw,   # in instrument currency (may be pence)
-            "group":           group_label,
+            "yahoo_symbol":      yahoo_sym,
+            "t212_ticker":       canonical,
+            "raw_t212_ticker":   raw_ticker,
+            "currency_code":     currency_cc,
+            "display_name":      display_nm,
+            "quantity":          quantity,
+            "avg_price_raw":     avg_price_raw,   # in instrument currency (may be pence)
+            "cur_price_raw":     cur_price_raw,   # in instrument currency (may be pence)
+            "group":             group_label,
+            "initial_weight_pct": initial_weight_pct,
         })
 
     if not holdings:
@@ -1447,7 +1502,7 @@ def health():
     return {
         "status":           "ok",
         "utc":              datetime.now(timezone.utc).isoformat(),
-        "version":          "2.0.2",
+        "version":          "2.0.3",
         "t212_base":        opts.get("t212_base", "https://demo.trading212.com"),
         "demo_mode":        "demo" in opts.get("t212_base", "demo"),
         "phase":            opts.get("portfolio_phase", "Momentum-Max"),
