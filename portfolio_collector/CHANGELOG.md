@@ -4,6 +4,50 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [2.0.0] — 2026-05-01
+
+### Changed — breaking
+- **T212 is now the source of truth.** The `holdings:` array has been removed
+  from `config.yaml`. Positions, quantities and prices are fetched live from
+  T212 on every snapshot. No manual holdings list is needed.
+- `POST /api/sync-from-t212` endpoint removed — auto-sync happens on every
+  `POST /api/collect`.
+- Snapshot now raises HTTP 503 (rather than using stale fallback data) when
+  the T212 API is unreachable.
+
+### Added
+- **Instrument catalog** — `GET /api/v0/equity/metadata/instruments` is fetched
+  from T212 and cached in SQLite (`instrument_catalog` table). Used to derive
+  Yahoo Finance symbols from exchange codes and to detect GBX (pence) instruments.
+- **Reliable pence handling** — uses `currencyCode == "GBX"` from the catalog
+  rather than heuristic price comparisons. Affects both T212 and Yahoo prices.
+- **ISA compact ticker resolution** — handles both `VWRLl_EQ` and `VWRL_EQ`
+  formats returned by T212 ISA accounts, resolving them to canonical tickers.
+- **Group labels in SQLite** — new `instrument_groups` table stores group
+  assignments. New instruments default to `unassigned` and trigger an HA
+  notification prompting assignment.
+- **Group manager UI** — FastAPI serves a HTML page at `/groups` (linked from
+  the HA sidebar ingress panel). Dropdowns auto-save on change.
+- **Snapshot sanity check** — new `max_snapshot_change_pct` option (default 20).
+  Snapshots whose portfolio value deviates by more than this percentage from the
+  previous snapshot are rejected and not written to the database.
+- **Phase change** — `POST /api/set-phase` now auto-enables `use_group_weights`
+  and resets the rebalance cooldown.
+- `GET /api/groups` — list all instrument group assignments.
+- `POST /api/groups/{ticker}` — update group label for an instrument.
+- `GET /api/catalog/status` — catalog cache info (age, TTL, instrument count).
+- `POST /api/catalog/refresh` — force catalog re-fetch bypassing TTL.
+- `catalog_cache_ttl_sec` config option (default 3600).
+- `unassigned_count` in snapshot response and `sensor.portfolio_value` attributes.
+
+### Migration from v1.6.x
+On first boot, `instrument_groups` is automatically seeded from any `holdings`
+array still in options.json (preserving group labels). Historical snapshots are
+untouched. The `holdings:` key in options.json is ignored by v2.0.0 and can be
+removed from the add-on Configuration UI.
+
+---
+
 ## [1.6.2] — 2026-04-28
 
 ### Added

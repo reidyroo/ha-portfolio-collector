@@ -1,11 +1,11 @@
 name: "Portfolio Collector"
 description: >
-  Trading 212 portfolio monitor — tracks up to 20 ETF/stock holdings,
-  computes drift from target weights, scores momentum, benchmarks against
-  MSCI World / S&P 500 / FTSE 100 / DOW / VIX, and suggests rebalance
-  trades for manual approval. Demo-first: safe to use before enabling
-  live execution.
-version: "1.6.2"
+  Trading 212 portfolio monitor — fetches live holdings directly from T212,
+  tracks portfolio value and drift against group-based target weights,
+  scores momentum, benchmarks against MSCI World / S&P 500 / FTSE 100 / DOW / VIX,
+  and suggests rebalance trades for manual approval. No holdings list required —
+  T212 is the source of truth.
+version: "2.0.0"
 slug: portfolio_collector
 init: false
 url: "https://github.com/YOUR_GITHUB_USERNAME/ha-portfolio-collector"
@@ -27,7 +27,7 @@ options:
   t212_token: ""
   t212_base: "https://demo.trading212.com"
 
-  # Date your portfolio was first purchased (used to anchor benchmark comparisons)
+  # Date your portfolio was first purchased (anchors benchmark comparisons)
   # Format: YYYY-MM-DD
   purchase_date: "2026-04-07"
 
@@ -40,97 +40,26 @@ options:
   # Portfolio phase — selects a preset bundle of guard-rails and group allocations.
   # Valid values: "Momentum-Max" | "Momentum-Chill" | "Balanced Growth" | "Pre-Retirement"
   # Set to any other string (e.g. "Custom") to use the individual settings below.
-  # The HA dashboard phase selector writes this value automatically.
   portfolio_phase: "Momentum-Max"
 
-  # Group-based weight derivation (optional)
-  # If true, individual target weights are derived from group allocations instead
-  # of the per-holding target_weight values.
+  # Group-based weight derivation
+  # If true, individual target weights are derived from group allocations.
+  # Auto-enabled when a phase is selected via the dashboard.
   use_group_weights: false
 
   # CVaR (tail-risk) constraint — set to 0 to disable
-  # When portfolio historical CVaR exceeds this threshold (%), non-defensive
-  # holdings are scaled back and weight redistributed to defensive ETFs.
   max_cvar_pct: 5.0
 
-  # Transaction cost rate (% of trade value, e.g. 0.1 = 0.1% = 10bps)
-  # Trades where expected benefit ≤ cost are skipped.
+  # Transaction cost rate (% of trade value, e.g. 0.1 = 10bps)
   cost_rate_pct: 0.1
 
-  # Portfolio holdings — up to 20 entries.
-  # yahoo_symbol   : Yahoo Finance ticker  (e.g. VWRL.L, ^GSPC, AAPL)
-  # t212_ticker    : Trading 212 instrument ticker (find via T212 search)
-  #                  Format examples: VWRL_EQ_XLON  XWEM_EQ_XETA  AAPL_US_EQ
-  # target_weight  : Target allocation % (does not need to sum to 100 —
-  #                  the collector normalises automatically)
-  # purchase_price : Average cost basis per unit in your account currency
-  # purchase_qty   : Number of units held at cost basis date
-  holdings:
-    - yahoo_symbol: "VWRL.L"
-      t212_ticker: "VWRL_EQ_XLON"
-      target_weight: 18.0
-      purchase_price: 123.67
-      purchase_qty: 7.278609
-    - yahoo_symbol: "IWFM.L"
-      t212_ticker: "IWFM_EQ_XLON"
-      target_weight: 14.01
-      purchase_price: 72.41
-      purchase_qty: 9.671180
-    - yahoo_symbol: "VAGP.L"
-      t212_ticker: "VAGP_EQ_XLON"
-      target_weight: 12.0
-      purchase_price: 22.50
-      purchase_qty: 26.666670
-    - yahoo_symbol: "XDEM.L"
-      t212_ticker: "XDEM_EQ_XLON"
-      target_weight: 10.0
-      purchase_price: 60.86
-      purchase_qty: 8.214227
-    - yahoo_symbol: "SSAC.L"
-      t212_ticker: "SSAC_EQ_XLON"
-      target_weight: 10.0
-      purchase_price: 81.47
-      purchase_qty: 6.137982
-    - yahoo_symbol: "VUSA.L"
-      t212_ticker: "VUSA_EQ_XLON"
-      target_weight: 8.0
-      purchase_price: 94.25
-      purchase_qty: 4.243244
-    - yahoo_symbol: "XWEM.DE"
-      t212_ticker: "XWEM_EQ_XETA"
-      target_weight: 5.99
-      purchase_price: 42.32
-      purchase_qty: 7.079663
-    - yahoo_symbol: "IMEU.L"
-      t212_ticker: "IMEU_EQ_XLON"
-      target_weight: 6.0
-      purchase_price: 32.57
-      purchase_qty: 9.212345
-    - yahoo_symbol: "IJPN.L"
-      t212_ticker: "IJPN_EQ_XLON"
-      target_weight: 4.0
-      purchase_price: 16.83
-      purchase_qty: 11.883540
-    - yahoo_symbol: "VFEM.L"
-      t212_ticker: "VFEM_EQ_XLON"
-      target_weight: 4.0
-      purchase_price: 58.03
-      purchase_qty: 3.447384
-    - yahoo_symbol: "IGLS.L"
-      t212_ticker: "IGLS_EQ_XLON"
-      target_weight: 4.0
-      purchase_price: 126.45
-      purchase_qty: 1.581903
-    - yahoo_symbol: "IWFQ.L"
-      t212_ticker: "IWFQ_EQ_XLON"
-      target_weight: 3.0
-      purchase_price: 59.67
-      purchase_qty: 2.512984
-    - yahoo_symbol: "MVOL.L"
-      t212_ticker: "MVOL_EQ_XLON"
-      target_weight: 1.0
-      purchase_price: 55.92
-      purchase_qty: 0.892925
+  # Snapshot sanity check — reject snapshot if portfolio value changes by more
+  # than this % from the previous snapshot. Prevents corrupt API data being saved.
+  # Set to 0 to disable.
+  max_snapshot_change_pct: 20
+
+  # Instrument catalog cache TTL in seconds (T212 rate-limits to 1 req/50s)
+  catalog_cache_ttl_sec: 3600
 
 # ── Schema ── (validation — keep in sync with options above) ─────────────────
 schema:
@@ -145,13 +74,8 @@ schema:
   use_group_weights: bool
   max_cvar_pct: float
   cost_rate_pct: float
-  holdings:
-    - yahoo_symbol: str
-      t212_ticker: str
-      target_weight: float
-      purchase_price: float
-      purchase_qty: float
-      group: str?
+  max_snapshot_change_pct: int
+  catalog_cache_ttl_sec: int
 
 panel_icon: mdi:chart-line
 panel_title: Portfolio

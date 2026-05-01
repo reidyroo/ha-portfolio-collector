@@ -1,25 +1,32 @@
 #!/usr/bin/env python3
 """
-Portfolio Collector — Home Assistant Add-on
-============================================
-Monitors a Trading 212 portfolio of up to 20 holdings, computes drift
-from target weights, scores momentum, benchmarks against major indices,
-and suggests rebalance trades for manual approval in Home Assistant.
+Portfolio Collector — Home Assistant Add-on v2.0.0
+===================================================
+Monitors a Trading 212 portfolio, computing drift from target weights,
+scoring momentum, benchmarking against major indices, and suggesting
+rebalance trades for manual approval in Home Assistant.
+
+T212 is the source of truth — no holdings list in config.  Positions are
+fetched live on every snapshot; instruments are matched via the T212
+catalog (cached in SQLite) and group labels are stored in the database.
 
 API endpoints
 ─────────────
-GET  /api/health                     Liveness probe
-GET  /api/latest-snapshot            Latest data (consumed by HA REST sensors)
-GET  /api/snapshots?limit=N          History (default 90 records)
-GET  /api/snapshots?summary=true     Lightweight list: as_of + portfolio_value only
-DELETE /api/snapshots?date=YYYY-MM-DD  Delete all snapshots for a given date
-GET  /api/benchmarks?days=N          Benchmark history
-POST /api/collect                    Run a full snapshot now
-POST /api/approve/{as_of}            Approve rebalance; add ?execute=true to place orders
-POST /api/reset-cooldown             Clear rebalance cooldown after a failed execution
-POST /api/sync-from-t212             Sync holdings from live T212 portfolio
-POST /api/sync-from-t212?preview=true  Dry-run: see what would change without writing
-POST /api/set-phase                  Apply a named portfolio phase preset {"phase": "..."}
+GET  /api/health                         Liveness probe
+GET  /api/latest-snapshot                Latest data (consumed by HA REST sensors)
+GET  /api/snapshots?limit=N              History (default 90 records)
+GET  /api/snapshots?summary=true         Lightweight list: as_of + portfolio_value only
+DELETE /api/snapshots?date=YYYY-MM-DD    Delete all snapshots for a given date
+GET  /api/benchmarks?days=N              Benchmark history
+POST /api/collect                        Run a full snapshot now
+POST /api/approve/{as_of}               Approve rebalance; ?execute=true places orders
+POST /api/reset-cooldown                 Clear rebalance cooldown after failed execution
+POST /api/set-phase                      Apply a named portfolio phase preset
+GET  /api/groups                         List all instrument group assignments
+POST /api/groups/{ticker}               Set group for an instrument {"group": "..."}
+GET  /api/catalog/status                 Catalog cache info
+POST /api/catalog/refresh                Force catalog re-fetch (rate-limited)
+GET  /groups                             HTML group-management UI (ingress panel)
 """
 
 import json
@@ -36,25 +43,24 @@ import requests
 import uvicorn
 import yfinance as yf
 from fastapi import Body, FastAPI, HTTPException
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-# ── Runtime constants (never change at runtime) ───────────────────────────────
-DB_PATH        = os.getenv("PORT_DB", "/data/portfolio.db")
-PORT           = int(os.getenv("PORT", "8000"))
-OPTIONS_PATH   = "/data/options.json"
+# ── Runtime constants ─────────────────────────────────────────────────────────
+DB_PATH      = os.getenv("PORT_DB", "/data/portfolio.db")
+PORT         = int(os.getenv("PORT", "8000"))
+OPTIONS_PATH = "/data/options.json"
 
-# ── ETF group definitions ──────────────────────────────────────────────────────
-# Group allocations define the neutral portfolio split.
-# Within each group holdings are weighted equally unless use_group_weights=false.
+# ── ETF group definitions ─────────────────────────────────────────────────────
 GROUP_ALLOCATIONS: dict[str, float] = {
-    "momentum_core":       25.0,   # Alpha engine: IWFM, XDEM, XWEM/XMOM
-    "global_beta":         40.0,   # Broad market: VWRL, SSAC
-    "regional_satellite":  20.0,   # Regional: VUSA, IMEU, IJPN, VFEM
-    "defensive":           10.0,   # Bonds: VAGP, IGLS
-    "optional_factor":      5.0,   # Quality/MinVol: IWFQ, MVOL
+    "momentum_core":       25.0,
+    "global_beta":         40.0,
+    "regional_satellite":  20.0,
+    "defensive":           10.0,
+    "optional_factor":      5.0,
 }
 
 GROUP_LABELS: dict[str, str] = {
@@ -63,26 +69,26 @@ GROUP_LABELS: dict[str, str] = {
     "regional_satellite":  "Regional Satellite",
     "defensive":           "Defensive",
     "optional_factor":     "Optional Factor",
+    "unassigned":          "Unassigned",
 }
 
-# Display order (0 = first). Used as a sort key in templates and the DB.
 GROUP_ORDER: dict[str, int] = {
     "momentum_core":      0,
     "global_beta":        1,
     "regional_satellite": 2,
     "defensive":          3,
     "optional_factor":    4,
+    "unassigned":         9,
 }
 
+VALID_GROUPS = [
+    "momentum_core", "global_beta", "regional_satellite",
+    "defensive", "optional_factor", "unassigned",
+]
+
 # ── Phase presets ─────────────────────────────────────────────────────────────
-# Each phase defines all guard-rail and allocation settings as a single bundle.
-# Selecting a phase (via the HA dashboard or POST /api/set-phase) applies the
-# full preset; individual options.json values for these keys are overridden.
-# To use fully custom settings, set portfolio_phase to any unrecognised string
-# (e.g. "Custom") and configure each option individually.
 PHASE_SETTINGS: dict[str, dict] = {
     "Momentum-Max": {
-        # Early accumulation — maximise growth, accept volatility, long horizon
         "group_allocations": {
             "momentum_core":       35.0,
             "global_beta":         40.0,
@@ -90,16 +96,12 @@ PHASE_SETTINGS: dict[str, dict] = {
             "defensive":            5.0,
             "optional_factor":      5.0,
         },
-        "max_cvar_pct":               6.5,   # only fires in genuine crisis
-        "cost_rate_pct":              0.10,  # execute momentum tilts freely
+        "max_cvar_pct":               6.5,
+        "cost_rate_pct":              0.10,
         "min_days_between_rebalance": 21,
         "vix_high_threshold":         25.0,
     },
     "Momentum-Chill": {
-        # Original portfolio pattern — strong momentum with meaningful regional
-        # diversification and a real defensive sleeve; weights derived directly
-        # from the default 13-ETF holdings (IWFM+XDEM+XWEM=30, VWRL+SSAC=28,
-        # VUSA+IMEU+IJPN+VFEM=22, VAGP+IGLS=16, IWFQ+MVOL=4).
         "group_allocations": {
             "momentum_core":       30.0,
             "global_beta":         28.0,
@@ -107,13 +109,12 @@ PHASE_SETTINGS: dict[str, dict] = {
             "defensive":           16.0,
             "optional_factor":      4.0,
         },
-        "max_cvar_pct":               5.5,   # between Max and Balanced Growth
+        "max_cvar_pct":               5.5,
         "cost_rate_pct":              0.10,
         "min_days_between_rebalance": 21,
         "vix_high_threshold":         25.0,
     },
     "Balanced Growth": {
-        # Mid-career — meaningful growth with growing volatility cushion
         "group_allocations": {
             "momentum_core":       25.0,
             "global_beta":         38.0,
@@ -121,13 +122,12 @@ PHASE_SETTINGS: dict[str, dict] = {
             "defensive":           15.0,
             "optional_factor":      5.0,
         },
-        "max_cvar_pct":               4.5,   # fires in elevated markets
+        "max_cvar_pct":               4.5,
         "cost_rate_pct":              0.10,
         "min_days_between_rebalance": 21,
         "vix_high_threshold":         25.0,
     },
     "Pre-Retirement": {
-        # Capital preservation — bonds dominate, momentum bets shrink
         "group_allocations": {
             "momentum_core":       10.0,
             "global_beta":         33.0,
@@ -135,68 +135,12 @@ PHASE_SETTINGS: dict[str, dict] = {
             "defensive":           35.0,
             "optional_factor":     10.0,
         },
-        "max_cvar_pct":               3.0,   # proactive defensive tilt
-        "cost_rate_pct":              0.20,  # reduce churn near retirement
-        "min_days_between_rebalance": 28,    # slower cadence
-        "vix_high_threshold":         20.0,  # tighter elevated-market rule
+        "max_cvar_pct":               3.0,
+        "cost_rate_pct":              0.20,
+        "min_days_between_rebalance": 28,
+        "vix_high_threshold":         20.0,
     },
 }
-
-# ── T212 ticker → Yahoo Finance symbol mapping ────────────────────────────────
-# Ordered longest-suffix-first so more specific rules win.
-_T212_EXCHANGE_MAP: list[tuple[str, str]] = [
-    ("_EQ_XLON", ".L"),    # London Stock Exchange
-    ("_EQ_XETA", ".DE"),   # XETRA Germany
-    ("_EQ_XAMS", ".AS"),   # Amsterdam (Euronext NL)
-    ("_EQ_XPAR", ".PA"),   # Paris (Euronext FR)
-    ("_EQ_XMIL", ".MI"),   # Milan (Borsa Italiana)
-    ("_EQ_XMAD", ".MC"),   # Madrid (BME)
-    ("_EQ_XSTO", ".ST"),   # Stockholm (Nasdaq Nordic)
-    ("_EQ_XCSE", ".CO"),   # Copenhagen
-    ("_EQ_XHEL", ".HE"),   # Helsinki
-    ("_EQ_XOSL", ".OL"),   # Oslo
-    ("_EQ_XNYS", ""),      # NYSE
-    ("_EQ_XNAS", ""),      # NASDAQ
-    ("_EQ_ARCX", ""),      # NYSE Arca (US ETFs)
-    ("_US_EQ",   ""),      # Generic US equity
-]
-
-VALID_GROUPS = list(GROUP_ORDER.keys())   # used for sync-from-t212 docs
-
-
-def _t212_ticker_to_yahoo(t212_ticker: str) -> str:
-    """Derive a Yahoo Finance symbol from a Trading 212 instrument ticker.
-
-    Examples:
-        VWRL_EQ_XLON  → VWRL.L
-        XWEM_EQ_XETA  → XWEM.DE
-        AAPL_US_EQ    → AAPL
-    """
-    for t212_suffix, yahoo_suffix in _T212_EXCHANGE_MAP:
-        if t212_ticker.endswith(t212_suffix):
-            return t212_ticker[: -len(t212_suffix)] + yahoo_suffix
-    # Fallback: strip the final _EXCHANGE segment
-    parts = t212_ticker.rsplit("_", 1)
-    return parts[0] if len(parts) == 2 else t212_ticker
-
-
-# ── Default holdings (used when options.json is absent / first run) ───────────
-# Format: yahoo_symbol, t212_ticker, target_weight, purchase_price, purchase_qty, group
-DEFAULT_HOLDINGS = [
-    {"yahoo_symbol": "VWRL.L",  "t212_ticker": "VWRL_EQ_XLON",  "target_weight": 18.00, "purchase_price": 123.67, "purchase_qty":  7.278609, "group": "global_beta"},
-    {"yahoo_symbol": "IWFM.L",  "t212_ticker": "IWFM_EQ_XLON",  "target_weight": 14.01, "purchase_price":  72.41, "purchase_qty":  9.671180, "group": "momentum_core"},
-    {"yahoo_symbol": "VAGP.L",  "t212_ticker": "VAGP_EQ_XLON",  "target_weight": 12.00, "purchase_price":  22.50, "purchase_qty": 26.666670, "group": "defensive"},
-    {"yahoo_symbol": "XDEM.L",  "t212_ticker": "XDEM_EQ_XLON",  "target_weight": 10.00, "purchase_price":  60.86, "purchase_qty":  8.214227, "group": "momentum_core"},
-    {"yahoo_symbol": "SSAC.L",  "t212_ticker": "SSAC_EQ_XLON",  "target_weight": 10.00, "purchase_price":  81.47, "purchase_qty":  6.137982, "group": "global_beta"},
-    {"yahoo_symbol": "VUSA.L",  "t212_ticker": "VUSA_EQ_XLON",  "target_weight":  8.00, "purchase_price":  94.25, "purchase_qty":  4.243244, "group": "regional_satellite"},
-    {"yahoo_symbol": "XWEM.DE", "t212_ticker": "XWEM_EQ_XETA",  "target_weight":  5.99, "purchase_price":  42.32, "purchase_qty":  7.079663, "group": "momentum_core"},
-    {"yahoo_symbol": "IMEU.L",  "t212_ticker": "IMEU_EQ_XLON",  "target_weight":  6.00, "purchase_price":  32.57, "purchase_qty":  9.212345, "group": "regional_satellite"},
-    {"yahoo_symbol": "IJPN.L",  "t212_ticker": "IJPN_EQ_XLON",  "target_weight":  4.00, "purchase_price":  16.83, "purchase_qty": 11.883540, "group": "regional_satellite"},
-    {"yahoo_symbol": "VFEM.L",  "t212_ticker": "VFEM_EQ_XLON",  "target_weight":  4.00, "purchase_price":  58.03, "purchase_qty":  3.447384, "group": "regional_satellite"},
-    {"yahoo_symbol": "IGLS.L",  "t212_ticker": "IGLS_EQ_XLON",  "target_weight":  4.00, "purchase_price": 126.45, "purchase_qty":  1.581903, "group": "defensive"},
-    {"yahoo_symbol": "IWFQ.L",  "t212_ticker": "IWFQ_EQ_XLON",  "target_weight":  3.00, "purchase_price":  59.67, "purchase_qty":  2.512984, "group": "optional_factor"},
-    {"yahoo_symbol": "MVOL.L",  "t212_ticker": "MVOL_EQ_XLON",  "target_weight":  1.00, "purchase_price":  55.92, "purchase_qty":  0.892925, "group": "optional_factor"},
-]
 
 BENCHMARKS = {
     "msci_world": "URTH",
@@ -206,158 +150,114 @@ BENCHMARKS = {
     "vix":        "^VIX",
 }
 
-app = FastAPI(title="Portfolio Collector", version="1.6.1")
+# ── Exchange → Yahoo Finance suffix ──────────────────────────────────────────
+# Keyed by T212 exchange ID (from instrument catalog or ticker suffix).
+_EXCHANGE_TO_YAHOO_SUFFIX: dict[str, str] = {
+    "XLON": ".L",    # London Stock Exchange
+    "XETA": ".DE",   # XETRA Germany
+    "XAMS": ".AS",   # Amsterdam (Euronext NL)
+    "XPAR": ".PA",   # Paris (Euronext FR)
+    "XMIL": ".MI",   # Milan (Borsa Italiana)
+    "XMAD": ".MC",   # Madrid (BME)
+    "XSTO": ".ST",   # Stockholm (Nasdaq Nordic)
+    "XCSE": ".CO",   # Copenhagen
+    "XHEL": ".HE",   # Helsinki
+    "XOSL": ".OL",   # Oslo
+    "XNYS": "",      # NYSE
+    "XNAS": "",      # NASDAQ
+    "ARCX": "",      # NYSE Arca (US ETFs)
+    "BATS": "",      # BATS
+}
+
+# Fallback: suffix string matching for when catalog is unavailable.
+# Ordered longest-first so more specific rules win.
+_T212_EXCHANGE_MAP: list[tuple[str, str]] = [
+    ("_EQ_XLON", ".L"),
+    ("_EQ_XETA", ".DE"),
+    ("_EQ_XAMS", ".AS"),
+    ("_EQ_XPAR", ".PA"),
+    ("_EQ_XMIL", ".MI"),
+    ("_EQ_XMAD", ".MC"),
+    ("_EQ_XSTO", ".ST"),
+    ("_EQ_XCSE", ".CO"),
+    ("_EQ_XHEL", ".HE"),
+    ("_EQ_XOSL", ".OL"),
+    ("_EQ_XNYS", ""),
+    ("_EQ_XNAS", ""),
+    ("_EQ_ARCX", ""),
+    ("_US_EQ",   ""),
+]
+
+app = FastAPI(title="Portfolio Collector", version="2.0.0")
 
 
-# ── Options / config loader ───────────────────────────────────────────────────
+# ── Ticker utilities ──────────────────────────────────────────────────────────
 
-def _read_options() -> dict:
-    """Read the HA add-on options from /data/options.json."""
-    if os.path.exists(OPTIONS_PATH):
-        try:
-            with open(OPTIONS_PATH) as f:
-                return json.load(f)
-        except Exception as exc:
-            log.error(f"Failed to read options.json: {exc}")
-    return {}
-
-
-def _write_options(opts: dict) -> None:
-    """Write back to /data/options.json (preserves all non-holdings keys)."""
-    with open(OPTIONS_PATH, "w") as f:
-        json.dump(opts, f, indent=2)
-
-
-def _group_based_weights(holdings: list, group_allocs: dict) -> dict[str, float]:
+def _base_symbol_from_ticker(ticker: str) -> str:
+    """Extract the bare trading symbol from a canonical T212 ticker.
+    "VWRL_EQ_XLON" → "VWRL",  "XWEM_EQ_XETA" → "XWEM",  "AAPL_US_EQ" → "AAPL"
     """
-    Derive individual target weights from group allocations.
-    Each holding within a group receives an equal share of that group's allocation.
-    Example: global_beta=40% with 2 ETFs → each gets 20%.
+    return ticker.split("_")[0]
+
+
+def _t212_ticker_to_yahoo(t212_ticker: str) -> str:
+    """Derive Yahoo Finance symbol from a T212 ticker using suffix matching.
+    Fallback used when the instrument catalog is unavailable.
     """
-    counts: dict[str, int] = {}
-    for h in holdings:
-        g = h.get("group", "global_beta")
-        counts[g] = counts.get(g, 0) + 1
-    weights = {}
-    for h in holdings:
-        g    = h.get("group", "global_beta")
-        alloc = group_allocs.get(g, 5.0)
-        weights[h["yahoo_symbol"]] = alloc / counts[g]
-    return weights
+    for t212_suffix, yahoo_suffix in _T212_EXCHANGE_MAP:
+        if t212_ticker.endswith(t212_suffix):
+            return t212_ticker[: -len(t212_suffix)] + yahoo_suffix
+    parts = t212_ticker.rsplit("_", 1)
+    return parts[0] if len(parts) == 2 else t212_ticker
 
 
-def _round_weights_to_integers(raw: dict[str, float]) -> dict[str, int]:
+def _derive_yahoo_symbol(instrument: dict) -> str:
+    """Derive Yahoo Finance symbol from T212 instrument catalog metadata.
+    Uses the exchange field (authoritative) then falls back to ticker parsing.
     """
-    Round a dict of {symbol: float_%} to whole-number integers that still
-    sum to exactly 100, using the largest-remainder (Hamilton) method.
-    Prevents fractional targets triggering pointless micro-trades.
+    ticker    = instrument.get("ticker", "")
+    base      = _base_symbol_from_ticker(ticker)
+    exchange  = instrument.get("exchange") or instrument.get("exchangeId", "")
+    if exchange in _EXCHANGE_TO_YAHOO_SUFFIX:
+        return base + _EXCHANGE_TO_YAHOO_SUFFIX[exchange]
+    # Fallback: parse ticker suffix
+    return _t212_ticker_to_yahoo(ticker)
+
+
+def _normalize_isa_ticker(compact_ticker: str, catalog: dict) -> str:
+    """Resolve a T212 ISA compact ticker to its canonical form.
+
+    ISA accounts return tickers like "VWRLl_EQ" instead of "VWRL_EQ_XLON".
+    This function resolves them via the catalog so group labels and Yahoo
+    symbols are always keyed by the canonical ticker.
+
+    Resolution order:
+      1. Already canonical   — "VWRL_EQ_XLON" is in catalog → return as-is
+      2. Lowercase-l prefix  — "VWRLl_EQ" → try "VWRL_EQ_XLON"
+      3. Bare _EQ suffix     — "VWRL_EQ" → search catalog by base symbol
+      4. Fallback            — return compact_ticker unchanged
     """
-    floors     = {sym: int(w) for sym, w in raw.items()}
-    remainders = {sym: w - int(w) for sym, w in raw.items()}
-    deficit    = 100 - sum(floors.values())
-    # Give the remaining 1s to whichever symbols have the largest fractional parts
-    for sym in sorted(remainders, key=remainders.__getitem__, reverse=True)[:deficit]:
-        floors[sym] += 1
-    return floors
+    if compact_ticker in catalog:
+        return compact_ticker
 
+    # Rule 2: lowercase 'l' before _EQ → London (XLON)
+    if compact_ticker.endswith("l_EQ"):
+        base      = compact_ticker[:-4].upper()
+        candidate = f"{base}_EQ_XLON"
+        if candidate in catalog:
+            log.debug(f"ISA compact: {compact_ticker} → {candidate}")
+            return candidate
 
-def load_config() -> dict:
-    """
-    Build the runtime config dict from options.json (or defaults).
-    Called at the start of every snapshot so weight changes take effect
-    immediately without restarting the add-on.
-    """
-    opts = _read_options()
+    # Rule 3: bare _EQ → scan catalog for matching base symbol
+    if compact_ticker.endswith("_EQ") and not compact_ticker.endswith("l_EQ"):
+        base = compact_ticker[:-3].upper()
+        for canonical in catalog:
+            if canonical.startswith(base + "_EQ_"):
+                log.debug(f"ISA bare _EQ: {compact_ticker} → {canonical}")
+                return canonical
 
-    holdings_raw = opts.get("holdings", DEFAULT_HOLDINGS)
-    if not holdings_raw:
-        log.warning("No holdings in options — using built-in defaults")
-        holdings_raw = DEFAULT_HOLDINGS
-
-    # Normalise weights to sum to exactly 100
-    total = sum(float(h.get("target_weight", 0)) for h in holdings_raw)
-    if total <= 0:
-        total = 100.0
-    if abs(total - 100.0) > 0.5:
-        log.warning(f"Target weights sum to {total:.2f}% — normalising to 100%")
-
-    # Build a lookup so holdings that were saved before v1.4.0 (no "group" field)
-    # automatically inherit the correct group from DEFAULT_HOLDINGS.
-    _default_group_map = {d["yahoo_symbol"]: d["group"] for d in DEFAULT_HOLDINGS}
-
-    holdings = []
-    for h in holdings_raw[:20]:   # hard cap at 20
-        sym = h["yahoo_symbol"].strip()
-        holdings.append({
-            "yahoo_symbol":   sym,
-            "t212_ticker":    h["t212_ticker"].strip(),
-            "target_weight":  float(h["target_weight"]) / total * 100,
-            "purchase_price": float(h.get("purchase_price", 0)),
-            "purchase_qty":   float(h.get("purchase_qty", 0)),
-            "group":          h.get("group") or _default_group_map.get(sym, "global_beta"),
-        })
-
-    # ── Phase preset — drives group allocations and all guard-rail settings ──────
-    # When portfolio_phase matches a known preset the full bundle applies.
-    # Individual options.json values for the same keys are ignored.
-    # Set portfolio_phase to any other string (e.g. "Custom") to fall back to
-    # the per-key options values.
-    phase        = opts.get("portfolio_phase", "Momentum-Max")
-    preset       = PHASE_SETTINGS.get(phase)
-
-    if preset:
-        log.info(f"Phase '{phase}' active — applying preset guard-rails and allocations")
-        group_allocs   = dict(preset["group_allocations"])
-        cfg_max_cvar   = preset["max_cvar_pct"]
-        cfg_cost_rate  = preset["cost_rate_pct"]
-        cfg_cooldown   = preset["min_days_between_rebalance"]
-        cfg_vix_high   = preset["vix_high_threshold"]
-    else:
-        log.info(f"Phase '{phase}' — using individual options settings")
-        group_allocs   = {
-            k: float(opts.get("group_allocations", {}).get(k, v))
-            for k, v in GROUP_ALLOCATIONS.items()
-        }
-        cfg_max_cvar   = float(opts.get("max_cvar_pct",  5.0))
-        cfg_cost_rate  = float(opts.get("cost_rate_pct", 0.1))
-        cfg_cooldown   = int(opts.get("min_days_between_rebalance", 21))
-        cfg_vix_high   = float(opts.get("vix_high_threshold", 25))
-
-    cfg_use_group_weights = bool(opts.get("use_group_weights", False))
-
-    # Round target weights to whole numbers (largest-remainder method keeps sum = 100).
-    # Drift and rebalance logic is then relative to clean integer targets, so
-    # sub-1% positional noise never triggers unnecessary trades.
-    fractional_weights = {h["yahoo_symbol"]: h["target_weight"] for h in holdings}
-
-    if cfg_use_group_weights:
-        fractional_weights = _group_based_weights(holdings, group_allocs)
-
-    rounded_weights    = _round_weights_to_integers(fractional_weights)
-    log.debug(f"Rounded target weights: {rounded_weights}")
-
-    return {
-        "t212_token":                  opts.get("t212_token",  os.getenv("T212_TOKEN", "")).strip(),
-        "t212_base":                   opts.get("t212_base",   os.getenv("T212_BASE", "https://demo.trading212.com")).strip(),
-        "purchase_date":               opts.get("purchase_date", "2026-04-07"),
-        "portfolio_phase":             phase,
-        "drift_threshold_pct":         float(opts.get("drift_threshold_pct", 15)),
-        "vix_high_threshold":          cfg_vix_high,
-        "vix_extreme_threshold":       float(opts.get("vix_extreme_threshold", 35)),
-        "min_days_between_rebalance":  cfg_cooldown,
-        "use_group_weights":           cfg_use_group_weights,
-        "max_cvar_pct":                cfg_max_cvar,
-        "cost_rate_pct":               cfg_cost_rate,
-        "group_allocations":           group_allocs,
-        "holdings":                    holdings,
-        # target_weights are whole-number ints — no fractional drift noise
-        "target_weights":    rounded_weights,
-        "yahoo_to_t212":     {h["yahoo_symbol"]: h["t212_ticker"]    for h in holdings},
-        "t212_to_yahoo":     {h["t212_ticker"]:  h["yahoo_symbol"]   for h in holdings},
-        "purchase_prices":   {h["yahoo_symbol"]: h["purchase_price"] for h in holdings},
-        "purchase_qtys":     {h["yahoo_symbol"]: h["purchase_qty"]   for h in holdings},
-        "symbol_groups":     {h["yahoo_symbol"]: h.get("group", "global_beta") for h in holdings},
-    }
+    log.warning(f"Cannot resolve ISA ticker '{compact_ticker}' — catalog has {len(catalog)} entries")
+    return compact_ticker
 
 
 # ── Database ──────────────────────────────────────────────────────────────────
@@ -390,27 +290,232 @@ def init_db():
             executed             INTEGER DEFAULT 0,
             executed_at          TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS instrument_catalog (
+            t212_ticker     TEXT PRIMARY KEY,
+            isin            TEXT,
+            name            TEXT,
+            currency_code   TEXT NOT NULL DEFAULT 'GBP',
+            exchange        TEXT,
+            yahoo_symbol    TEXT,
+            fetched_at      TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS instrument_groups (
+            t212_ticker     TEXT PRIMARY KEY,
+            yahoo_symbol    TEXT NOT NULL DEFAULT '',
+            display_name    TEXT NOT NULL DEFAULT '',
+            group_label     TEXT NOT NULL DEFAULT 'unassigned',
+            updated_at      TEXT NOT NULL
+        );
     """)
     conn.commit()
     conn.close()
     log.info(f"Database ready: {DB_PATH}")
 
 
+def _migrate_groups_from_options():
+    """One-time migration: seed instrument_groups from options.json holdings array.
+    Safe to call on every startup — does nothing if instrument_groups already
+    has rows or if options.json has no holdings.
+    """
+    conn = get_db()
+    count = conn.execute("SELECT COUNT(*) FROM instrument_groups").fetchone()[0]
+    if count > 0:
+        conn.close()
+        return
+
+    opts     = _read_options()
+    holdings = opts.get("holdings", [])
+    if not holdings:
+        conn.close()
+        log.info("Migration: no holdings in options.json — instrument_groups will be populated on first collect")
+        return
+
+    now = datetime.now(timezone.utc).isoformat()
+    for h in holdings:
+        conn.execute(
+            """INSERT OR IGNORE INTO instrument_groups
+               (t212_ticker, yahoo_symbol, display_name, group_label, updated_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (
+                h.get("t212_ticker", ""),
+                h.get("yahoo_symbol", ""),
+                h.get("yahoo_symbol", ""),
+                h.get("group", "unassigned"),
+                now,
+            ),
+        )
+    conn.commit()
+    conn.close()
+    log.info(f"Migration: seeded instrument_groups with {len(holdings)} holding(s) from options.json")
+
+
+# ── Group DB helpers ──────────────────────────────────────────────────────────
+
+def _load_instrument_groups(conn: sqlite3.Connection) -> dict[str, dict]:
+    """Return {t212_ticker: {group_label, yahoo_symbol, display_name}} for all rows."""
+    rows = conn.execute("SELECT * FROM instrument_groups").fetchall()
+    return {r["t212_ticker"]: dict(r) for r in rows}
+
+
+def _seed_new_instruments(
+    positions: list,
+    catalog: dict,
+    conn: sqlite3.Connection,
+) -> int:
+    """Add any position not yet in instrument_groups with group_label='unassigned'.
+    Existing rows are left untouched. Returns the number of newly added rows.
+    """
+    now     = datetime.now(timezone.utc).isoformat()
+    added   = 0
+    for pos in positions:
+        raw_ticker  = pos.get("ticker", "")
+        canonical   = _normalize_isa_ticker(raw_ticker, catalog)
+        instrument  = catalog.get(canonical, {})
+        yahoo_sym   = instrument.get("yahoo_symbol") or _t212_ticker_to_yahoo(canonical)
+        display_name = instrument.get("name") or instrument.get("shortName") or yahoo_sym
+
+        existing = conn.execute(
+            "SELECT 1 FROM instrument_groups WHERE t212_ticker=?", (canonical,)
+        ).fetchone()
+        if not existing:
+            conn.execute(
+                """INSERT OR IGNORE INTO instrument_groups
+                   (t212_ticker, yahoo_symbol, display_name, group_label, updated_at)
+                   VALUES (?, ?, ?, 'unassigned', ?)""",
+                (canonical, yahoo_sym, display_name, now),
+            )
+            log.info(f"New instrument: {canonical} ({yahoo_sym}) — group=unassigned")
+            added += 1
+        else:
+            # Update yahoo_symbol / display_name if catalog improved them
+            conn.execute(
+                """UPDATE instrument_groups
+                   SET yahoo_symbol=?, display_name=?, updated_at=?
+                   WHERE t212_ticker=? AND (yahoo_symbol='' OR display_name='')""",
+                (yahoo_sym, display_name, now, canonical),
+            )
+    if added:
+        conn.commit()
+    return added
+
+
+# ── Options / config helpers ──────────────────────────────────────────────────
+
+def _read_options() -> dict:
+    if os.path.exists(OPTIONS_PATH):
+        try:
+            with open(OPTIONS_PATH) as f:
+                return json.load(f)
+        except Exception as exc:
+            log.error(f"Failed to read options.json: {exc}")
+    return {}
+
+
+def _write_options(opts: dict) -> None:
+    with open(OPTIONS_PATH, "w") as f:
+        json.dump(opts, f, indent=2)
+
+
+def _group_based_weights(holdings: list, group_allocs: dict) -> dict[str, float]:
+    """Equal share within each group, scaled by the group's total allocation."""
+    counts: dict[str, int] = {}
+    for h in holdings:
+        g = h.get("group", "global_beta")
+        if g == "unassigned":
+            g = "global_beta"
+        counts[g] = counts.get(g, 0) + 1
+    weights = {}
+    for h in holdings:
+        g     = h.get("group", "global_beta")
+        if g == "unassigned":
+            g = "global_beta"
+        alloc = group_allocs.get(g, 5.0)
+        weights[h["yahoo_symbol"]] = alloc / counts[g]
+    return weights
+
+
+def _round_weights_to_integers(raw: dict[str, float]) -> dict[str, int]:
+    """Hamilton (largest-remainder) rounding so integer weights sum to 100."""
+    floors     = {sym: int(w) for sym, w in raw.items()}
+    remainders = {sym: w - int(w) for sym, w in raw.items()}
+    deficit    = 100 - sum(floors.values())
+    for sym in sorted(remainders, key=remainders.__getitem__, reverse=True)[:deficit]:
+        floors[sym] += 1
+    return floors
+
+
+def _compute_target_weights(holdings: list, cfg: dict) -> dict[str, int]:
+    """Derive rounded integer target weights from the live holdings list.
+    Group-based if use_group_weights=True, otherwise equal-weight.
+    """
+    n = len(holdings)
+    if n == 0:
+        return {}
+    if cfg.get("use_group_weights") and any(h["group"] != "unassigned" for h in holdings):
+        fractional = _group_based_weights(holdings, cfg["group_allocations"])
+    else:
+        fractional = {h["yahoo_symbol"]: 100.0 / n for h in holdings}
+    return _round_weights_to_integers(fractional)
+
+
+def load_config() -> dict:
+    """Build runtime config from options.json.
+    Holdings are NOT loaded here — they come from T212 live positions +
+    the instrument_groups DB table, built inside compute_snapshot().
+    """
+    opts   = _read_options()
+    phase  = opts.get("portfolio_phase", "Momentum-Max")
+    preset = PHASE_SETTINGS.get(phase)
+
+    if preset:
+        log.info(f"Phase '{phase}' active — applying preset guard-rails and allocations")
+        group_allocs  = dict(preset["group_allocations"])
+        cfg_max_cvar  = preset["max_cvar_pct"]
+        cfg_cost_rate = preset["cost_rate_pct"]
+        cfg_cooldown  = preset["min_days_between_rebalance"]
+        cfg_vix_high  = preset["vix_high_threshold"]
+    else:
+        log.info(f"Phase '{phase}' — using individual options settings")
+        group_allocs  = {k: float(opts.get("group_allocations", {}).get(k, v))
+                         for k, v in GROUP_ALLOCATIONS.items()}
+        cfg_max_cvar  = float(opts.get("max_cvar_pct",  5.0))
+        cfg_cost_rate = float(opts.get("cost_rate_pct", 0.1))
+        cfg_cooldown  = int(opts.get("min_days_between_rebalance", 21))
+        cfg_vix_high  = float(opts.get("vix_high_threshold", 25))
+
+    return {
+        "t212_token":                 opts.get("t212_token", os.getenv("T212_TOKEN", "")).strip(),
+        "t212_base":                  opts.get("t212_base", os.getenv("T212_BASE", "https://demo.trading212.com")).strip(),
+        "purchase_date":              opts.get("purchase_date", "2026-04-07"),
+        "portfolio_phase":            phase,
+        "drift_threshold_pct":        float(opts.get("drift_threshold_pct", 15)),
+        "vix_high_threshold":         cfg_vix_high,
+        "vix_extreme_threshold":      float(opts.get("vix_extreme_threshold", 35)),
+        "min_days_between_rebalance": cfg_cooldown,
+        "use_group_weights":          bool(opts.get("use_group_weights", False)),
+        "max_cvar_pct":               cfg_max_cvar,
+        "cost_rate_pct":              cfg_cost_rate,
+        "group_allocations":          group_allocs,
+        "max_snapshot_change_pct":    int(opts.get("max_snapshot_change_pct", 20)),
+        "catalog_cache_ttl_sec":      int(opts.get("catalog_cache_ttl_sec", 3600)),
+    }
+
+
 # ── Trading 212 API ───────────────────────────────────────────────────────────
 
 def _t212_headers(cfg: dict) -> dict:
     token = cfg["t212_token"]
-    # Accept a raw Base64(keyId:secret) string and add the Basic prefix automatically.
-    # If the user accidentally includes the prefix themselves, don't double-add it.
     if token and not token.lower().startswith(("basic ", "bearer ")):
         token = f"Basic {token}"
     return {"Authorization": token, "Content-Type": "application/json"}
 
 
 def fetch_t212_portfolio(cfg: dict) -> list:
+    """Fetch live positions from T212. Raises HTTPException on failure."""
     if not cfg["t212_token"]:
-        log.warning("t212_token not set — using cost-basis fallback")
-        return _fallback_positions(cfg)
+        raise HTTPException(503, "t212_token not configured — cannot fetch live portfolio")
     try:
         r = requests.get(
             f"{cfg['t212_base']}/api/v0/equity/portfolio",
@@ -420,14 +525,15 @@ def fetch_t212_portfolio(cfg: dict) -> list:
         data = r.json()
         log.info(f"T212 portfolio: {len(data)} position(s)")
         return data
+    except HTTPException:
+        raise
     except Exception as exc:
-        log.error(f"T212 portfolio fetch failed: {exc} — using fallback")
-        return _fallback_positions(cfg)
+        raise HTTPException(503, f"T212 portfolio fetch failed: {exc}")
 
 
 def fetch_t212_cash(cfg: dict) -> dict:
     if not cfg["t212_token"]:
-        return {"free": 0.0, "total": 0.0, "invested": 0.0, "ppl": 0.0}
+        return {"free": 0.0}
     try:
         r = requests.get(
             f"{cfg['t212_base']}/api/v0/equity/account/cash",
@@ -440,34 +546,105 @@ def fetch_t212_cash(cfg: dict) -> dict:
         return {"free": 0.0}
 
 
-def _fallback_positions(cfg: dict) -> list:
-    """Synthetic positions from cost-basis data when the API is unreachable."""
-    return [
-        {
-            "ticker":       cfg["yahoo_to_t212"][sym],
-            "quantity":     cfg["purchase_qtys"][sym],
-            "averagePrice": cfg["purchase_prices"][sym],
-            "currentPrice": cfg["purchase_prices"][sym],
-            "ppl":          0.0,
+def fetch_instrument_catalog(cfg: dict, force: bool = False) -> dict:
+    """Fetch T212 instrument metadata, using SQLite as a TTL cache.
+
+    Returns dict keyed by canonical t212_ticker:
+      { "VWRL_EQ_XLON": { "currency_code": "GBX", "exchange": "XLON",
+                           "yahoo_symbol": "VWRL.L", "name": "...", ... }, ... }
+
+    Falls back gracefully to empty dict if no token or API unavailable.
+    """
+    ttl = cfg.get("catalog_cache_ttl_sec", 3600)
+    conn = get_db()
+
+    if not force:
+        # Check cache freshness
+        oldest = conn.execute(
+            "SELECT MIN(fetched_at) FROM instrument_catalog"
+        ).fetchone()[0]
+        if oldest:
+            try:
+                age_sec = (
+                    datetime.now(timezone.utc)
+                    - datetime.fromisoformat(oldest.replace("Z", "+00:00"))
+                ).total_seconds()
+                if age_sec < ttl:
+                    rows = conn.execute("SELECT * FROM instrument_catalog").fetchall()
+                    conn.close()
+                    return {r["t212_ticker"]: dict(r) for r in rows}
+            except Exception:
+                pass
+
+    if not cfg["t212_token"]:
+        rows = conn.execute("SELECT * FROM instrument_catalog").fetchall()
+        conn.close()
+        if rows:
+            log.warning("No T212 token — returning stale catalog cache")
+        else:
+            log.warning("No T212 token and no catalog cache — ticker derivation will use fallback")
+        return {r["t212_ticker"]: dict(r) for r in rows}
+
+    log.info("Fetching T212 instrument catalog (rate-limited: 1 req/50s)…")
+    try:
+        r = requests.get(
+            f"{cfg['t212_base']}/api/v0/equity/metadata/instruments",
+            headers=_t212_headers(cfg), timeout=60,
+        )
+        r.raise_for_status()
+        instruments: list = r.json()
+        log.info(f"T212 catalog: {len(instruments)} instruments received")
+    except Exception as exc:
+        log.error(f"T212 catalog fetch failed: {exc} — using cached data")
+        rows = conn.execute("SELECT * FROM instrument_catalog").fetchall()
+        conn.close()
+        return {r["t212_ticker"]: dict(r) for r in rows}
+
+    now     = datetime.now(timezone.utc).isoformat()
+    catalog = {}
+    for inst in instruments:
+        ticker   = inst.get("ticker", "")
+        if not ticker:
+            continue
+        exchange = inst.get("exchange") or inst.get("exchangeId") or ""
+        currency = inst.get("currencyCode") or inst.get("currency", "GBP")
+        name     = inst.get("name") or inst.get("shortName") or ticker
+        isin     = inst.get("isin", "")
+        yahoo    = _derive_yahoo_symbol({
+            "ticker": ticker, "exchange": exchange, **inst
+        })
+        catalog[ticker] = {
+            "t212_ticker":  ticker,
+            "isin":         isin,
+            "name":         name,
+            "currency_code": currency,
+            "exchange":     exchange,
+            "yahoo_symbol": yahoo,
+            "fetched_at":   now,
         }
-        for sym in cfg["target_weights"]
-    ]
+        conn.execute(
+            """INSERT OR REPLACE INTO instrument_catalog
+               (t212_ticker, isin, name, currency_code, exchange, yahoo_symbol, fetched_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (ticker, isin, name, currency, exchange, yahoo, now),
+        )
+
+    conn.commit()
+    conn.close()
+    log.info(f"Catalog cached: {len(catalog)} instruments")
+    return catalog
 
 
 def place_market_order(cfg: dict, t212_ticker: str, quantity: float) -> dict:
-    """Place a market order. Only called after explicit approval.
-    Positive quantity = BUY, negative quantity = SELL (T212 convention).
-    """
+    """Place a market order. Positive = BUY, negative = SELL."""
     if not cfg["t212_token"]:
         return {"error": "No t212_token configured"}
     payload = {"ticker": t212_ticker, "quantity": round(quantity, 6)}
-    log.info(f"T212 order payload: {payload}  base={cfg['t212_base']}")
+    log.info(f"T212 order: {payload}  base={cfg['t212_base']}")
     try:
         r = requests.post(
             f"{cfg['t212_base']}/api/v0/equity/orders/market",
-            headers=_t212_headers(cfg),
-            json=payload,
-            timeout=20,
+            headers=_t212_headers(cfg), json=payload, timeout=20,
         )
         if not r.ok:
             body = r.text[:500]
@@ -486,7 +663,6 @@ def fetch_yahoo_history(symbols: list, period: str = "13mo") -> pd.DataFrame:
     except Exception:
         pass
 
-    # Attempt 1: batch download (fast)
     try:
         raw = yf.download(symbols, period=period, interval="1d",
                           auto_adjust=True, progress=False, threads=False)
@@ -501,8 +677,7 @@ def fetch_yahoo_history(symbols: list, period: str = "13mo") -> pd.DataFrame:
     except Exception as exc:
         log.warning(f"Batch Yahoo download failed ({exc}) — falling back to per-ticker")
 
-    # Attempt 2: one ticker at a time with back-off
-    log.info(f"Fetching {len(symbols)} tickers individually...")
+    log.info(f"Fetching {len(symbols)} tickers individually…")
     frames = {}
     for sym in symbols:
         for attempt in range(3):
@@ -525,33 +700,32 @@ def fetch_yahoo_history(symbols: list, period: str = "13mo") -> pd.DataFrame:
         log.error("Yahoo Finance returned no data")
         return pd.DataFrame()
 
-    result = pd.DataFrame(frames).dropna(how="all")
-    log.info(f"Per-ticker complete: {len(frames)}/{len(symbols)} symbols")
-    return result
+    return pd.DataFrame(frames).dropna(how="all")
 
 
-def _to_gbp(yahoo_price: float, symbol: str, avg_price_gbp: float, eurgbp: float) -> float:
+def _to_gbp_v2(price: float, currency_code: str, eurgbp: float, eurusd: float = 1.0) -> float:
+    """Convert a price to GBP using the instrument's authoritative currency code.
+
+    GBX (pence)  → divide by 100  (Yahoo .L and T212 LSE prices are both in pence)
+    GBP          → as-is
+    EUR          → multiply by EUR/GBP rate
+    USD          → multiply by EUR/GBP ÷ EUR/USD  (USD→EUR→GBP via cross rate)
+    other        → returned unchanged with a warning log
     """
-    Normalise a Yahoo Finance price to GBP.
+    cc = (currency_code or "GBP").upper()
+    if cc == "GBX":
+        return price / 100.0
+    if cc == "GBP":
+        return price
+    if cc == "EUR":
+        return price * eurgbp if eurgbp > 0 else price
+    if cc == "USD":
+        return price * (eurgbp / eurusd) if eurgbp > 0 and eurusd > 0 else price
+    log.warning(f"Unknown currency_code '{currency_code}' — price returned unconverted")
+    return price
 
-    LSE (.L) securities: Yahoo returns pence (GBp).  We detect this by
-    comparing against the known GBP cost-basis: if the Yahoo price is
-    more than 50× the GBP avg price it must be in pence → divide by 100.
 
-    Xetra (.DE) securities: Yahoo returns EUR → multiply by EUR/GBP rate.
-
-    All other exchanges: assumed to already be in GBP (or USD-denominated
-    instruments held in a GBP account where T212 handles conversion).
-    """
-    if symbol.endswith(".L"):
-        if avg_price_gbp > 0 and yahoo_price > avg_price_gbp * 50:
-            log.debug(f"{symbol}: pence detected ({yahoo_price:.1f}p) → £{yahoo_price/100:.2f}")
-            return yahoo_price / 100.0
-    elif symbol.endswith(".DE"):
-        if eurgbp > 0:
-            return yahoo_price * eurgbp
-    return yahoo_price
-
+# ── Analytics helpers (unchanged) ─────────────────────────────────────────────
 
 def _period_return(series: pd.Series, bars: int) -> Optional[float]:
     s = series.dropna()
@@ -559,17 +733,11 @@ def _period_return(series: pd.Series, bars: int) -> Optional[float]:
 
 
 def _return_since_date(series: pd.Series, purchase_date_str: str) -> Optional[float]:
-    """
-    Return % gain from the first available price on-or-after purchase_date_str
-    through to the most recent price in the series.
-    Used to anchor benchmark comparisons to the portfolio's actual purchase date.
-    """
     s = series.dropna()
     if s.empty:
         return None
     try:
         ts = pd.Timestamp(purchase_date_str)
-        # Align timezone if index is tz-aware
         if s.index.tz is not None:
             ts = ts.tz_localize(s.index.tz)
         after = s[s.index >= ts]
@@ -592,7 +760,7 @@ def _ema_trend(series: pd.Series, fast: int = 20, slow: int = 50) -> str:
     s = series.dropna()
     if len(s) < slow:
         return "neutral"
-    f = float(s.ewm(span=fast, adjust=False).mean().iloc[-1])
+    f  = float(s.ewm(span=fast, adjust=False).mean().iloc[-1])
     sl = float(s.ewm(span=slow, adjust=False).mean().iloc[-1])
     if f > sl * 1.005:
         return "bullish"
@@ -607,15 +775,14 @@ def _rs_vs_world(holding: pd.Series, world: pd.Series, bars: int = 63) -> Option
         return None
     h = holding.loc[common]
     b = world.loc[common]
-    return round(float(h.iloc[-1] / h.iloc[-bars] - 1) * 100 - float(b.iloc[-1] / b.iloc[-bars] - 1) * 100, 2)
+    return round(
+        float(h.iloc[-1] / h.iloc[-bars] - 1) * 100
+        - float(b.iloc[-1] / b.iloc[-bars] - 1) * 100,
+        2,
+    )
 
 
 def _wma_trend_score(price_series: pd.Series, lookback: int = 126) -> float:
-    """
-    Linearly-weighted moving average of returns divided by volatility.
-    Gives a dimensionless trend signal: positive = uptrend, negative = downtrend.
-    Lookback of 126 bars ≈ 6 months (optimal for momentum persistence).
-    """
     s = price_series.dropna()
     if len(s) < lookback + 2:
         return 0.0
@@ -631,12 +798,6 @@ def _wma_trend_score(price_series: pd.Series, lookback: int = 126) -> float:
 
 
 def _portfolio_cvar(weights_pct: dict, hist_df: pd.DataFrame, alpha: float = 0.95) -> float:
-    """
-    Historical CVaR (Expected Shortfall) at alpha confidence level.
-    weights_pct: {symbol: float_%} — need not sum to 100.
-    Returns the expected daily loss in the worst (1-alpha)% of trading days.
-    A value of 0.02 means the portfolio loses ≥2% on its worst days on average.
-    """
     syms = [s for s in weights_pct if s in hist_df.columns and weights_pct.get(s, 0) > 0]
     if not syms:
         return 0.0
@@ -646,85 +807,185 @@ def _portfolio_cvar(weights_pct: dict, hist_df: pd.DataFrame, alpha: float = 0.9
     w = np.array([weights_pct[s] for s in syms], dtype=float)
     w /= w.sum()
     port_rets = rets[syms].values @ w
-    cutoff = max(int((1.0 - alpha) * len(port_rets)), 1)
-    tail = np.sort(port_rets)[:cutoff]
+    cutoff    = max(int((1.0 - alpha) * len(port_rets)), 1)
+    tail      = np.sort(port_rets)[:cutoff]
     return round(float(-tail.mean()), 6)
 
 
 # ── Core snapshot ─────────────────────────────────────────────────────────────
 
+def _sanity_check_snapshot(new_value: float, cfg: dict) -> tuple[bool, str]:
+    """Compare new_value against the last saved snapshot.
+    Returns (True, "") if safe to save, or (False, reason) if rejected.
+    Set max_snapshot_change_pct=0 to disable.
+    """
+    threshold = cfg.get("max_snapshot_change_pct", 20)
+    if threshold <= 0:
+        return True, ""
+    conn = get_db()
+    row  = conn.execute(
+        "SELECT portfolio_value FROM snapshots ORDER BY as_of DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    if not row:
+        return True, ""   # First snapshot ever — always allow
+    last_value = float(row["portfolio_value"])
+    if last_value <= 0:
+        return True, ""
+    change_pct = abs(new_value - last_value) / last_value * 100
+    if change_pct > threshold:
+        reason = (
+            f"Snapshot rejected: portfolio value £{new_value:.2f} differs from "
+            f"last snapshot £{last_value:.2f} by {change_pct:.1f}% "
+            f"(threshold {threshold}%). Likely a data error — not saved."
+        )
+        log.warning(reason)
+        return False, reason
+    return True, ""
+
+
 def compute_snapshot() -> dict:
-    # Reload config on every run so UI changes take effect without restart
     cfg = load_config()
-    log.info(f"=== Snapshot started — {len(cfg['target_weights'])} holdings, "
-             f"T212={cfg['t212_base']} ===")
+    log.info(f"=== Snapshot started — phase={cfg['portfolio_phase']}  T212={cfg['t212_base']} ===")
 
-    raw_positions  = fetch_t212_portfolio(cfg)
-    cash_data      = fetch_t212_cash(cfg)
-    t212_by_ticker = {p["ticker"]: p for p in raw_positions if isinstance(p, dict)}
+    # ── Fetch live T212 data ────────────────────────────────────────────────────
+    raw_positions = fetch_t212_portfolio(cfg)   # raises 503 on failure
+    cash_data     = fetch_t212_cash(cfg)
 
-    # Include EUR/GBP rate for any Xetra (.DE) holdings
-    all_symbols = list(cfg["target_weights"].keys()) + list(BENCHMARKS.values()) + ["EURGBP=X"]
-    hist = fetch_yahoo_history(all_symbols)
+    # ── Instrument catalog (cached) ────────────────────────────────────────────
+    catalog = fetch_instrument_catalog(cfg)
 
-    # EUR/GBP spot rate for converting Xetra prices
+    # ── Seed new instruments into the groups DB ────────────────────────────────
+    conn = get_db()
+    new_count = _seed_new_instruments(raw_positions, catalog, conn)
+    if new_count:
+        log.info(f"{new_count} new instrument(s) added to instrument_groups as 'unassigned'")
+
+    groups_db = _load_instrument_groups(conn)
+    conn.close()
+
+    # ── EUR rates ───────────────────────────────────────────────────────────────
+    # Fetch FX first with a lightweight call so we can convert prices.
+    # We'll merge into the main Yahoo history fetch below.
+    fx_symbols = ["EURGBP=X", "EURUSD=X"]
+
+    # ── Build holdings list from live positions + catalog + groups ─────────────
+    holdings = []
+    for pos in raw_positions:
+        raw_ticker = pos.get("ticker", "")
+        quantity   = float(pos.get("quantity", 0))
+        if not raw_ticker or quantity <= 0:
+            continue
+
+        canonical   = _normalize_isa_ticker(raw_ticker, catalog)
+        instrument  = catalog.get(canonical, {})
+        yahoo_sym   = instrument.get("yahoo_symbol") or _t212_ticker_to_yahoo(canonical)
+        currency_cc = instrument.get("currency_code", "GBP")
+        display_nm  = instrument.get("name") or instrument.get("shortName") or yahoo_sym
+
+        group_row   = groups_db.get(canonical, {})
+        group_label = group_row.get("group_label", "unassigned")
+
+        avg_price_raw = float(pos.get("averagePrice") or 0)
+        cur_price_raw = float(pos.get("currentPrice") or avg_price_raw)
+
+        holdings.append({
+            "yahoo_symbol":    yahoo_sym,
+            "t212_ticker":     canonical,
+            "raw_t212_ticker": raw_ticker,
+            "currency_code":   currency_cc,
+            "display_name":    display_nm,
+            "quantity":        quantity,
+            "avg_price_raw":   avg_price_raw,   # in instrument currency (may be pence)
+            "cur_price_raw":   cur_price_raw,   # in instrument currency (may be pence)
+            "group":           group_label,
+        })
+
+    if not holdings:
+        raise HTTPException(503, "T212 returned no holdings — cannot build snapshot")
+
+    log.info(f"Holdings: {len(holdings)}  unassigned: {sum(1 for h in holdings if h['group'] == 'unassigned')}")
+
+    # ── Compute target weights ─────────────────────────────────────────────────
+    target_weights = _compute_target_weights(holdings, cfg)
+
+    # Augment cfg with holdings-derived lookups for _compute_rebalance
+    cfg["target_weights"] = target_weights
+    cfg["symbol_groups"]  = {h["yahoo_symbol"]: h["group"] for h in holdings}
+    cfg["yahoo_to_t212"]  = {h["yahoo_symbol"]: h["t212_ticker"] for h in holdings}
+
+    # ── Fetch Yahoo Finance history ────────────────────────────────────────────
+    all_symbols = (
+        [h["yahoo_symbol"] for h in holdings]
+        + list(BENCHMARKS.values())
+        + fx_symbols
+    )
+    hist = fetch_yahoo_history(list(dict.fromkeys(all_symbols)))  # deduplicated
+
+    # Extract FX rates
     eurgbp = 1.0
+    eurusd = 1.0
     if "EURGBP=X" in hist.columns:
         s = hist["EURGBP=X"].dropna()
         if not s.empty:
             eurgbp = float(s.iloc[-1])
-            log.info(f"EUR/GBP rate: {eurgbp:.4f}")
+            log.info(f"EUR/GBP: {eurgbp:.4f}")
+    if "EURUSD=X" in hist.columns:
+        s = hist["EURUSD=X"].dropna()
+        if not s.empty:
+            eurusd = float(s.iloc[-1])
 
-    # Build positions
+    # ── Build positions ────────────────────────────────────────────────────────
     positions   = []
     total_value = 0.0
 
-    for sym, target_wt in cfg["target_weights"].items():
-        t212_tick = cfg["yahoo_to_t212"][sym]
-        t212_pos  = t212_by_ticker.get(t212_tick, {})
+    for h in holdings:
+        sym    = h["yahoo_symbol"]
+        cc     = h["currency_code"]
+        qty    = h["quantity"]
 
-        qty       = float(t212_pos.get("quantity",     cfg["purchase_qtys"][sym]))
-        avg_price = float(t212_pos.get("averagePrice", cfg["purchase_prices"][sym]))
+        # Convert prices from instrument currency → GBP
+        avg_price = _to_gbp_v2(h["avg_price_raw"], cc, eurgbp, eurusd)
+        cur_t212  = _to_gbp_v2(h["cur_price_raw"], cc, eurgbp, eurusd) if h["cur_price_raw"] else 0.0
 
-        # ── Current price: T212 first (always in account currency = GBP),
-        #    Yahoo as fallback with pence/EUR normalisation.
-        #
-        #    WHY: Yahoo Finance returns LSE (.L) prices in pence (GBp),
-        #    not pounds — VWRL.L shows ~12,500 not ~125.  T212's API
-        #    already converts to the account currency so it is always correct.
-        t212_current = float(t212_pos["currentPrice"]) if t212_pos.get("currentPrice") else 0.0
-        if t212_current > 0:
-            current_price = t212_current
+        # T212 price preferred (already in account currency after conversion);
+        # fall back to Yahoo if T212 price is zero or missing.
+        if cur_t212 > 0:
+            current_price = cur_t212
         elif sym in hist.columns and not hist[sym].dropna().empty:
-            current_price = _to_gbp(float(hist[sym].dropna().iloc[-1]), sym, avg_price, eurgbp)
+            yahoo_raw     = float(hist[sym].dropna().iloc[-1])
+            current_price = _to_gbp_v2(yahoo_raw, cc, eurgbp, eurusd)
         else:
             current_price = avg_price
 
         market_value = qty * current_price
         cost_basis   = qty * avg_price
-        pnl_pct      = (current_price / avg_price - 1) * 100 if avg_price else 0.0
+        pnl_pct      = (current_price / avg_price - 1) * 100 if avg_price > 0 else 0.0
+        target_wt    = target_weights.get(sym, 0)
 
-        log.debug(f"{sym}: qty={qty:.4f}  avg=£{avg_price:.4f}  "
+        log.debug(f"{sym} ({cc}): qty={qty:.4f}  avg=£{avg_price:.4f}  "
                   f"cur=£{current_price:.4f}  val=£{market_value:.2f}")
 
         total_value += market_value
         positions.append({
             "symbol":        sym,
-            "t212_ticker":   t212_tick,
+            "t212_ticker":   h["t212_ticker"],
+            "display_name":  h["display_name"],
             "quantity":      round(qty, 6),
             "avg_price":     round(avg_price, 4),
             "current_price": round(current_price, 4),
             "market_value":  round(market_value, 2),
             "cost_basis":    round(cost_basis, 2),
             "pnl_pct":       round(pnl_pct, 2),
-            "group":         cfg["symbol_groups"].get(sym, "global_beta"),
-            "group_order":   GROUP_ORDER.get(cfg["symbol_groups"].get(sym, "global_beta"), 9),
-            "target_wt":     round(target_wt, 2),
+            "group":         h["group"],
+            "group_order":   GROUP_ORDER.get(h["group"], 9),
+            "target_wt":     target_wt,
         })
 
     cash = float(cash_data.get("free", 0.0))
     total_value += cash
 
+    # Drift
     for p in positions:
         actual_wt      = p["market_value"] / total_value * 100 if total_value else 0.0
         drift_abs      = actual_wt - p["target_wt"]
@@ -733,26 +994,22 @@ def compute_snapshot() -> dict:
         p["drift_abs"] = round(drift_abs, 2)
         p["drift_rel"] = round(drift_rel, 2)
 
-    max_drift_rel = max(abs(p["drift_rel"]) for p in positions) if positions else 0.0
+    max_drift_rel = max((abs(p["drift_rel"]) for p in positions), default=0.0)
     total_cost    = sum(p["cost_basis"] for p in positions)
     portfolio_return_pct = (total_value - total_cost) / total_cost * 100 if total_cost else 0.0
 
-    # Group allocation summary
+    # Group summary
     group_summary: dict[str, dict] = {}
     for p in positions:
         g = p.get("group", "global_beta")
         if g not in group_summary:
-            group_summary[g] = {
-                "label":     GROUP_LABELS.get(g, g),
-                "actual_wt": 0.0,
-                "target_wt": 0.0,
-            }
+            group_summary[g] = {"label": GROUP_LABELS.get(g, g), "actual_wt": 0.0, "target_wt": 0.0}
         group_summary[g]["actual_wt"] = round(group_summary[g]["actual_wt"] + p["actual_wt"], 2)
         group_summary[g]["target_wt"] = round(group_summary[g]["target_wt"] + p["target_wt"], 2)
 
     # Benchmarks
-    benchmarks    = {}
-    world_series  = hist.get("URTH")
+    benchmarks   = {}
+    world_series = hist.get("URTH")
     purchase_date = cfg.get("purchase_date", "2026-04-07")
     for name, ticker in BENCHMARKS.items():
         if ticker not in hist.columns:
@@ -762,13 +1019,13 @@ def compute_snapshot() -> dict:
             continue
         since_purchase = _return_since_date(s, purchase_date)
         benchmarks[name] = {
-            "ticker":               ticker,
-            "latest":               round(float(s.iloc[-1]), 2),
-            "return_1d":            round(_period_return(s, 1)   or 0.0, 2),
-            "return_1w":            round(_period_return(s, 5)   or 0.0, 2),
-            "return_1m":            round(_period_return(s, 21)  or 0.0, 2),
-            "return_3m":            round(_period_return(s, 63)  or 0.0, 2),
-            "return_6m":            round(_period_return(s, 126) or 0.0, 2),
+            "ticker":                ticker,
+            "latest":                round(float(s.iloc[-1]), 2),
+            "return_1d":             round(_period_return(s, 1)   or 0.0, 2),
+            "return_1w":             round(_period_return(s, 5)   or 0.0, 2),
+            "return_1m":             round(_period_return(s, 21)  or 0.0, 2),
+            "return_3m":             round(_period_return(s, 63)  or 0.0, 2),
+            "return_6m":             round(_period_return(s, 126) or 0.0, 2),
             "return_since_purchase": since_purchase if since_purchase is not None else 0.0,
         }
         log.info(f"Benchmark {name}: since_purchase={since_purchase}%  1m={benchmarks[name]['return_1m']}%")
@@ -776,29 +1033,28 @@ def compute_snapshot() -> dict:
     vix = benchmarks.get("vix", {}).get("latest", 0.0)
 
     # Momentum
-    momentum = {}
-    for sym in cfg["target_weights"]:
+    momentum: dict[str, dict] = {}
+    for h in holdings:
+        sym = h["yahoo_symbol"]
         if sym not in hist.columns:
             momentum[sym] = {}
             continue
         s  = hist[sym].dropna()
         rs = _rs_vs_world(s, world_series, 63) if world_series is not None else None
         momentum[sym] = {
-            "momentum_12m":  round(v, 2) if (v := _momentum(s, 252))    is not None else None,
-            "momentum_9m":   round(v, 2) if (v := _momentum(s, 189))    is not None else None,
-            "momentum_6m":   round(v, 2) if (v := _momentum(s, 126))    is not None else None,
-            "momentum_3m":   round(v, 2) if (v := _momentum(s, 63, 0))  is not None else None,
-            "trend":         _ema_trend(s),
-            "trend_score":   _wma_trend_score(s, 126),   # WMA signal for weight tilting
-            "return_1m":     round(_period_return(s, 21) or 0.0, 2),
-            "return_3m":     round(_period_return(s, 63) or 0.0, 2),
+            "momentum_12m":   round(v, 2) if (v := _momentum(s, 252))    is not None else None,
+            "momentum_9m":    round(v, 2) if (v := _momentum(s, 189))    is not None else None,
+            "momentum_6m":    round(v, 2) if (v := _momentum(s, 126))    is not None else None,
+            "momentum_3m":    round(v, 2) if (v := _momentum(s, 63, 0))  is not None else None,
+            "trend":          _ema_trend(s),
+            "trend_score":    _wma_trend_score(s, 126),
+            "return_1m":      round(_period_return(s, 21) or 0.0, 2),
+            "return_3m":      round(_period_return(s, 63) or 0.0, 2),
             "rs_vs_world_3m": rs,
-            "group":         cfg["symbol_groups"].get(sym, "global_beta"),
-            "group_order":   GROUP_ORDER.get(cfg["symbol_groups"].get(sym, "global_beta"), 9),
+            "group":          h["group"],
+            "group_order":    GROUP_ORDER.get(h["group"], 9),
         }
 
-    # Blended score: 50% WMA trend (scaled to % range), 30% 6m momentum, 20% 12m momentum.
-    # WMA trend score is dimensionless (~±0.05); multiply by 100 to match % momentum scale.
     mom_scores: dict[str, float] = {}
     for sym, m in momentum.items():
         if not m:
@@ -816,10 +1072,21 @@ def compute_snapshot() -> dict:
     if suggested_actions:
         for a in suggested_actions:
             flag = " [BALANCING]" if a.get("balancing_trade") else ""
-            log.info(f"  Trade: {a['action']:4s} {a['symbol']:10s}  "
+            log.info(f"  Trade: {a['action']:4s} {a['symbol']:12s}  "
                      f"cur={a['current_wt']:.1f}%  tgt={a['target_wt']:.1f}%  "
                      f"£{a['delta_value']:+.0f}  {a['delta_units']:+.6f} units{flag}")
 
+    # ── Sanity check ───────────────────────────────────────────────────────────
+    unassigned_count = sum(1 for h in holdings if h["group"] == "unassigned")
+    ok, reject_reason = _sanity_check_snapshot(total_value, cfg)
+    if not ok:
+        return {
+            "rejected":       True,
+            "reason":         reject_reason,
+            "portfolio_value": round(total_value, 2),
+        }
+
+    # ── Persist ────────────────────────────────────────────────────────────────
     as_of = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     conn  = get_db()
     conn.execute("""
@@ -846,16 +1113,25 @@ def compute_snapshot() -> dict:
     conn.close()
 
     log.info(f"Snapshot saved: £{total_value:.2f}  return={portfolio_return_pct:.2f}%  "
-             f"max_drift={max_drift_rel:.1f}%  rebalance={rebalance_needed}  vix={vix}")
+             f"max_drift={max_drift_rel:.1f}%  rebalance={rebalance_needed}  vix={vix}  "
+             f"unassigned={unassigned_count}")
 
     return {
-        "as_of": as_of, "portfolio_value": round(total_value, 2),
-        "invested_value": round(total_cost, 2), "cash": round(cash, 2),
+        "as_of":                as_of,
+        "portfolio_value":      round(total_value, 2),
+        "invested_value":       round(total_cost, 2),
+        "cash":                 round(cash, 2),
         "portfolio_return_pct": round(portfolio_return_pct, 2),
-        "positions": positions, "benchmarks": benchmarks, "momentum": momentum,
-        "rebalance_needed": rebalance_needed, "rebalance_reason": rebalance_reason,
-        "suggested_actions": suggested_actions, "vix": vix, "approved": False,
-        "group_summary": group_summary,
+        "positions":            positions,
+        "benchmarks":           benchmarks,
+        "momentum":             momentum,
+        "rebalance_needed":     rebalance_needed,
+        "rebalance_reason":     rebalance_reason,
+        "suggested_actions":    suggested_actions,
+        "vix":                  vix,
+        "approved":             False,
+        "group_summary":        group_summary,
+        "unassigned_count":     unassigned_count,
     }
 
 
@@ -864,13 +1140,15 @@ def _compute_rebalance(cfg, positions, mom_scores, momentum, vix, total_value, m
     vix_extreme   = cfg["vix_extreme_threshold"]
     cooldown_days = cfg["min_days_between_rebalance"]
 
-    # Cooldown
     conn = get_db()
-    row  = conn.execute("SELECT approved_at FROM snapshots WHERE executed=1 ORDER BY executed_at DESC LIMIT 1").fetchone()
+    row  = conn.execute(
+        "SELECT approved_at FROM snapshots WHERE executed=1 ORDER BY executed_at DESC LIMIT 1"
+    ).fetchone()
     conn.close()
     if row and row["approved_at"]:
         try:
-            days = (datetime.now(timezone.utc) - datetime.fromisoformat(row["approved_at"].replace("Z", "+00:00"))).days
+            days = (datetime.now(timezone.utc)
+                    - datetime.fromisoformat(row["approved_at"].replace("Z", "+00:00"))).days
             if days < cooldown_days:
                 return False, f"Cooldown: {days}d since last rebalance (min {cooldown_days}d)", []
         except Exception:
@@ -879,21 +1157,14 @@ def _compute_rebalance(cfg, positions, mom_scores, momentum, vix, total_value, m
     if vix > vix_extreme:
         return False, f"VIX={vix:.1f} — extreme volatility, rebalancing frozen", []
 
-    # Integer-rounding rule: only trade holdings whose rounded actual weight
-    # differs from the integer target. This avoids micro-trades caused by
-    # sub-1% positional noise.
-    #   Normal market  — trade if round(actual) ≠ target  (any integer mismatch)
-    #   VIX elevated   — trade only if gap ≥ 2 whole points (more conservative)
     def _int_gap(p):
         return abs(round(p["actual_wt"]) - int(p["target_wt"]))
 
-    # Require ≥1 integer point in normal markets; ≥2 when VIX is elevated.
-    # Trades whenever the rounded actual weight differs from the integer target.
     if vix > vix_high:
         min_gap = 2
         drifted = [p for p in positions if _int_gap(p) >= min_gap]
         if not drifted:
-            return False, f"VIX={vix:.1f} elevated — no holding is ≥2 pts off target, holding", []
+            return False, f"VIX={vix:.1f} elevated — no holding ≥2 pts off target, holding", []
     else:
         min_gap = 1
         drifted = [p for p in positions if _int_gap(p) >= min_gap]
@@ -903,18 +1174,15 @@ def _compute_rebalance(cfg, positions, mom_scores, momentum, vix, total_value, m
 
     adj_weights = _momentum_adjusted_weights(cfg["target_weights"], mom_scores, vix, vix_high)
 
-    # ── CVaR constraint ───────────────────────────────────────────────────────
-    # If portfolio tail risk exceeds the configured limit, scale back non-defensive
-    # holdings and redistribute weight to defensive ETFs.
     max_cvar = cfg.get("max_cvar_pct", 5.0) / 100.0
     if hist is not None and not hist.empty and max_cvar > 0:
         cvar = _portfolio_cvar(adj_weights, hist)
         if cvar > max_cvar:
             defensive_syms = {sym for sym, g in cfg["symbol_groups"].items() if g == "defensive"}
-            scale = max_cvar / cvar
+            scale  = max_cvar / cvar
             scaled = {sym: (w if sym in defensive_syms else w * scale)
                       for sym, w in adj_weights.items()}
-            total_s = sum(scaled.values())
+            total_s    = sum(scaled.values())
             adj_weights = {sym: v / total_s * 100 for sym, v in scaled.items()}
             log.info(f"CVaR={cvar:.4f} > limit={max_cvar:.4f} — defensive tilt applied")
 
@@ -924,76 +1192,69 @@ def _compute_rebalance(cfg, positions, mom_scores, momentum, vix, total_value, m
         sym         = p["symbol"]
         delta_units = delta_val / p["current_price"] if p["current_price"] else 0.0
         return {
-            "symbol":              sym,
-            "t212_ticker":         p["t212_ticker"],
-            "action":              "BUY" if delta_val > 0 else "SELL",
-            "current_wt":          p["actual_wt"],
-            "target_wt":           round(adj_weights[sym], 2),
-            "original_target_wt":  int(cfg["target_weights"][sym]),
-            "delta_value":         round(delta_val, 2),
-            "delta_units":         round(delta_units, 6),   # signed: +ve=buy, -ve=sell
-            "current_value":       round(p["market_value"], 2),
-            "target_value":        round(total_value * adj_weights[sym] / 100, 2),
-            "drift_rel":           p["drift_rel"],
-            "momentum_score":      mom_scores.get(sym, 0.0),
-            "balancing_trade":     balancing,
+            "symbol":             sym,
+            "t212_ticker":        p["t212_ticker"],
+            "action":             "BUY" if delta_val > 0 else "SELL",
+            "current_wt":         p["actual_wt"],
+            "target_wt":          round(adj_weights[sym], 2),
+            "original_target_wt": int(cfg["target_weights"][sym]),
+            "delta_value":        round(delta_val, 2),
+            "delta_units":        round(delta_units, 6),
+            "current_value":      round(p["market_value"], 2),
+            "target_value":       round(total_value * adj_weights[sym] / 100, 2),
+            "drift_rel":          p["drift_rel"],
+            "momentum_score":     mom_scores.get(sym, 0.0),
+            "balancing_trade":    balancing,
         }
 
-    actions = []
-    # Primary trades: holdings that have crossed an integer boundary
+    actions   = []
     cost_rate = cfg.get("cost_rate_pct", 0.1) / 100.0
     for p in positions:
         if _int_gap(p) < min_gap:
             continue
         sym       = p["symbol"]
+        if sym not in adj_weights:
+            continue
         delta_val = total_value * adj_weights[sym] / 100 - p["market_value"]
         if abs(delta_val) < 10.0:
             continue
-        # Transaction cost filter: skip trades where benefit ≤ cost
         trade_cost       = abs(delta_val) * cost_rate
         expected_benefit = abs(delta_val) * abs(p["drift_rel"]) / 100.0
         if expected_benefit <= trade_cost:
-            log.info(f"  Skipped {sym}: cost filter — benefit £{expected_benefit:.2f} ≤ cost £{trade_cost:.2f}, threshold={cost_rate*100:.2f}%")
+            log.info(f"  Skipped {sym}: cost filter — benefit £{expected_benefit:.2f} ≤ cost £{trade_cost:.2f}")
             continue
         actions.append(_make_action(p, delta_val))
         traded_syms.add(sym)
 
-    # Balancing pass: the drifted trades may net to a cash surplus (all sells) or
-    # deficit (all buys). Add one counterpart trade from the untouched holding
-    # that is furthest from its target in the opposite direction, sized to absorb
-    # exactly the imbalance so total buys ≈ total sells.
     net = sum(a["delta_value"] for a in actions)
     if abs(net) >= 10.0:
         untouched = [p for p in positions if p["symbol"] not in traded_syms]
         if net < 0:
-            # Net sell — find the most under-weighted holding to absorb freed cash
             best = max(untouched, key=lambda p: p["target_wt"] - p["actual_wt"], default=None)
         else:
-            # Net buy — find the most over-weighted holding to fund the purchase
             best = max(untouched, key=lambda p: p["actual_wt"] - p["target_wt"], default=None)
         if best:
-            # Size the balancing trade to cancel the net exactly (not to full target)
-            bal_delta = -net
-            actions.append(_make_action(best, bal_delta, balancing=True))
+            actions.append(_make_action(best, -net, balancing=True))
 
     actions.sort(key=lambda x: (x["action"] != "SELL", -abs(x["delta_value"])))
     drifted_summary = ", ".join(
         f"{p['symbol']} ({p['actual_wt']:.1f}%→{int(p['target_wt'])}%)"
         for p in drifted
     )
-    reason = (f"{len(drifted)} holding(s) crossed integer target: {drifted_summary}"
-              + (f"; VIX elevated ({vix:.1f}) — ≥2pt gap required" if vix > vix_high else "")
-              )
+    reason = (
+        f"{len(drifted)} holding(s) crossed integer target: {drifted_summary}"
+        + (f"; VIX elevated ({vix:.1f}) — ≥2pt gap required" if vix > vix_high else "")
+    )
     return True, reason, actions
 
 
 def _momentum_adjusted_weights(target_weights, mom_scores, vix, vix_high):
     dampen = 0.5 if vix > vix_high else 1.0
-    raw = {}
+    raw    = {}
     for sym, base_wt in target_weights.items():
         score = mom_scores.get(sym, 0.0)
-        if   score > 10: mult = 1.0 + 0.20 * dampen
-        elif score >  5: mult = 1.0 + 0.10 * dampen
+        if   score > 10:  mult = 1.0 + 0.20 * dampen
+        elif score >  5:  mult = 1.0 + 0.10 * dampen
         elif score < -10: mult = 1.0 - 0.20 * dampen
         elif score <  -5: mult = 1.0 - 0.10 * dampen
         else:             mult = 1.0
@@ -1002,19 +1263,179 @@ def _momentum_adjusted_weights(target_weights, mom_scores, vix, vix_high):
     return {sym: v / total * 100 for sym, v in raw.items()}
 
 
+# ── Groups HTML page ──────────────────────────────────────────────────────────
+
+_GROUPS_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Portfolio Groups</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body { background: #111827; color: #e5e7eb; font-family: system-ui, -apple-system, sans-serif;
+           margin: 0; padding: 1.25rem; }
+    h1   { font-size: 1.2rem; color: #f9fafb; margin: 0 0 0.25rem; }
+    .sub { color: #9ca3af; font-size: 0.8rem; margin: 0 0 1.25rem; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    th   { text-align: left; padding: 0.45rem 0.75rem; border-bottom: 2px solid #374151;
+           color: #9ca3af; font-weight: 600; text-transform: uppercase;
+           font-size: 0.7rem; letter-spacing: 0.05em; white-space: nowrap; }
+    td   { padding: 0.45rem 0.75rem; border-bottom: 1px solid #1f2937; vertical-align: middle; }
+    tr:hover td { background: #1a2233; }
+    select { background: #1f2937; color: #e5e7eb; border: 1px solid #374151;
+             border-radius: 0.35rem; padding: 0.2rem 0.5rem; font-size: 0.82rem;
+             cursor: pointer; min-width: 170px; }
+    select:focus { outline: none; border-color: #6366f1; }
+    select.changed { border-color: #f59e0b; }
+    .mono { font-family: monospace; font-size: 0.75rem; color: #6366f1; }
+    .dim  { color: #6b7280; font-size: 0.75rem; }
+    .badge-new { background: #78350f; color: #fcd34d; font-size: 0.65rem;
+                 padding: 0.1rem 0.35rem; border-radius: 0.2rem; margin-right: 0.35rem;
+                 font-weight: 600; vertical-align: middle; }
+    .st   { font-size: 0.72rem; margin-left: 0.4rem; }
+    .ok   { color: #10b981; }
+    .err  { color: #ef4444; }
+    .saving { color: #f59e0b; }
+    .unassigned-row td:first-child { color: #f59e0b; }
+  </style>
+</head>
+<body>
+  <h1>Portfolio Instrument Groups</h1>
+  <p class="sub">Assign each holding to a group. Groups drive phase allocations.
+     New instruments are tagged <strong style="color:#fcd34d">NEW</strong> until assigned.
+     Changes save immediately.</p>
+  <table>
+    <thead>
+      <tr><th>Instrument</th><th>Yahoo</th><th>T212 Ticker</th><th>Group</th><th></th></tr>
+    </thead>
+    <tbody id="tbody">
+      <tr><td colspan="5" style="text-align:center;color:#9ca3af;padding:2rem">Loading…</td></tr>
+    </tbody>
+  </table>
+
+  <script>
+    const GROUPS = [
+      ['momentum_core',      'Momentum Core'],
+      ['global_beta',        'Global Beta'],
+      ['regional_satellite', 'Regional Satellite'],
+      ['defensive',          'Defensive'],
+      ['optional_factor',    'Optional Factor'],
+      ['unassigned',         'Unassigned'],
+    ];
+
+    function base() {
+      const p = window.location.pathname;
+      const i = p.lastIndexOf('/groups');
+      return window.location.origin + (i >= 0 ? p.slice(0, i) : p);
+    }
+
+    function rowId(ticker) { return 'r-' + btoa(ticker).replace(/=/g, ''); }
+    function stId(ticker)  { return 's-' + btoa(ticker).replace(/=/g, ''); }
+
+    async function load() {
+      const tbody = document.getElementById('tbody');
+      try {
+        const res  = await fetch(base() + '/api/groups');
+        const data = await res.json();
+        if (!data.length) {
+          tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#9ca3af;padding:2rem">' +
+            'No instruments yet. Run a snapshot first.</td></tr>';
+          return;
+        }
+        // Sort: unassigned first, then alphabetical by yahoo_symbol
+        data.sort((a, b) => {
+          if (a.group_label === 'unassigned' && b.group_label !== 'unassigned') return -1;
+          if (b.group_label === 'unassigned' && a.group_label !== 'unassigned') return  1;
+          return (a.yahoo_symbol || '').localeCompare(b.yahoo_symbol || '');
+        });
+        tbody.innerHTML = data.map(row => {
+          const isNew = row.group_label === 'unassigned';
+          const opts  = GROUPS.map(([v, l]) =>
+            `<option value="${v}"${v === row.group_label ? ' selected' : ''}>${l}</option>`
+          ).join('');
+          const rid = rowId(row.t212_ticker);
+          const sid = stId(row.t212_ticker);
+          const enc = encodeURIComponent(row.t212_ticker);
+          return `<tr id="${rid}" class="${isNew ? 'unassigned-row' : ''}">
+            <td>${isNew ? '<span class="badge-new">NEW</span>' : ''}${row.display_name || row.yahoo_symbol}</td>
+            <td class="mono">${row.yahoo_symbol}</td>
+            <td class="dim">${row.t212_ticker}</td>
+            <td><select id="sel-${rid}" onchange="save('${enc}','${rid}','${sid}',this)">${opts}</select></td>
+            <td><span class="st" id="${sid}"></span></td>
+          </tr>`;
+        }).join('');
+      } catch(e) {
+        tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:#ef4444;padding:2rem">Error: ${e.message}</td></tr>`;
+      }
+    }
+
+    async function save(encTicker, rid, sid, sel) {
+      const st = document.getElementById(sid);
+      const tr = document.getElementById(rid);
+      st.className = 'st saving'; st.textContent = 'Saving…';
+      try {
+        const res = await fetch(base() + '/api/groups/' + encTicker, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({group: sel.value}),
+        });
+        if (res.ok) {
+          st.className = 'st ok'; st.textContent = '✓ Saved';
+          if (sel.value !== 'unassigned') tr.classList.remove('unassigned-row');
+          setTimeout(() => { st.textContent = ''; }, 2500);
+        } else {
+          const err = await res.json().catch(() => ({}));
+          st.className = 'st err'; st.textContent = '✗ ' + (err.detail || 'Error');
+        }
+      } catch(e) {
+        st.className = 'st err'; st.textContent = '✗ Network error';
+      }
+    }
+
+    load();
+  </script>
+</body>
+</html>"""
+
+
 # ── FastAPI routes ────────────────────────────────────────────────────────────
+
+@app.get("/")
+def root():
+    """Redirect sidebar panel to the groups management page."""
+    return RedirectResponse(url="/groups")
+
 
 @app.get("/api/health")
 def health():
-    cfg = _read_options()
+    opts = _read_options()
+    conn = get_db()
+    catalog_count    = conn.execute("SELECT COUNT(*) FROM instrument_catalog").fetchone()[0]
+    unassigned_count = conn.execute(
+        "SELECT COUNT(*) FROM instrument_groups WHERE group_label='unassigned'"
+    ).fetchone()[0]
+    oldest_fetched = conn.execute("SELECT MIN(fetched_at) FROM instrument_catalog").fetchone()[0]
+    conn.close()
+    catalog_age_sec = None
+    if oldest_fetched:
+        try:
+            catalog_age_sec = int((
+                datetime.now(timezone.utc)
+                - datetime.fromisoformat(oldest_fetched.replace("Z", "+00:00"))
+            ).total_seconds())
+        except Exception:
+            pass
     return {
-        "status":      "ok",
-        "utc":         datetime.now(timezone.utc).isoformat(),
-        "t212_base":   cfg.get("t212_base", "https://demo.trading212.com"),
-        "demo_mode":   "demo" in cfg.get("t212_base", "demo"),
-        "holdings":    len(cfg.get("holdings", DEFAULT_HOLDINGS)),
-        "phase":       cfg.get("portfolio_phase", "Momentum-Max"),
-        "version":     "1.6.2",
+        "status":           "ok",
+        "utc":              datetime.now(timezone.utc).isoformat(),
+        "version":          "2.0.0",
+        "t212_base":        opts.get("t212_base", "https://demo.trading212.com"),
+        "demo_mode":        "demo" in opts.get("t212_base", "demo"),
+        "phase":            opts.get("portfolio_phase", "Momentum-Max"),
+        "catalog_instruments": catalog_count,
+        "catalog_age_sec":  catalog_age_sec,
+        "unassigned_count": unassigned_count,
     }
 
 
@@ -1030,15 +1451,11 @@ def latest_snapshot():
 
 @app.get("/api/snapshots")
 def list_snapshots(limit: int = 90, summary: bool = False):
-    """
-    List snapshots. ?summary=true returns only as_of + portfolio_value (fast, no JSON parsing).
-    Use ?limit=N to control how many records are returned (default 90).
-    """
+    """List snapshots. ?summary=true returns only as_of + portfolio_value."""
     conn = get_db()
     if summary:
         rows = conn.execute(
-            "SELECT as_of, portfolio_value FROM snapshots ORDER BY as_of DESC LIMIT ?",
-            (limit,),
+            "SELECT as_of, portfolio_value FROM snapshots ORDER BY as_of DESC LIMIT ?", (limit,)
         ).fetchall()
         conn.close()
         return [{"as_of": r["as_of"], "portfolio_value": round(r["portfolio_value"], 2)} for r in rows]
@@ -1049,14 +1466,9 @@ def list_snapshots(limit: int = 90, summary: bool = False):
 
 @app.delete("/api/snapshots")
 def delete_snapshots(date: str):
-    """
-    Delete all snapshots for a given date (YYYY-MM-DD).
-    Example: DELETE /api/snapshots?date=2026-04-28
-    """
-    conn = get_db()
-    result = conn.execute(
-        "DELETE FROM snapshots WHERE as_of LIKE ?", (f"{date}%",)
-    )
+    """Delete all snapshots for a given date. Example: DELETE /api/snapshots?date=2026-04-28"""
+    conn    = get_db()
+    result  = conn.execute("DELETE FROM snapshots WHERE as_of LIKE ?", (f"{date}%",))
     deleted = result.rowcount
     conn.commit()
     conn.close()
@@ -1072,10 +1484,7 @@ def trigger_collect():
 
 @app.post("/api/approve/{as_of}")
 def approve_rebalance(as_of: str, execute: bool = False):
-    """
-    Approve the rebalance plan for the given snapshot timestamp.
-    Pass ?execute=true to also submit orders to T212 (live mode only).
-    """
+    """Approve the rebalance plan. Pass ?execute=true to submit orders to T212."""
     conn = get_db()
     row  = conn.execute("SELECT * FROM snapshots WHERE as_of=?", (as_of,)).fetchone()
     if not row:
@@ -1106,17 +1515,18 @@ def approve_rebalance(as_of: str, execute: bool = False):
 @app.get("/api/benchmarks")
 def benchmark_history(days: int = 90):
     conn = get_db()
-    rows = conn.execute("SELECT as_of, benchmarks_json FROM snapshots ORDER BY as_of DESC LIMIT ?", (days,)).fetchall()
+    rows = conn.execute(
+        "SELECT as_of, benchmarks_json FROM snapshots ORDER BY as_of DESC LIMIT ?", (days,)
+    ).fetchall()
     conn.close()
     return [{"as_of": r["as_of"], "benchmarks": json.loads(r["benchmarks_json"] or "{}")} for r in rows]
 
 
 @app.post("/api/reset-cooldown")
 def reset_cooldown():
-    """Clear the executed flag on all snapshots so the rebalance cooldown resets.
-    Use after a failed execution to allow an immediate retry."""
+    """Clear the executed flag on all snapshots to reset the rebalance cooldown."""
     conn = get_db()
-    n = conn.execute("UPDATE snapshots SET executed=0, executed_at=NULL WHERE executed=1").rowcount
+    n    = conn.execute("UPDATE snapshots SET executed=0, executed_at=NULL WHERE executed=1").rowcount
     conn.commit()
     conn.close()
     log.info(f"Cooldown reset — cleared executed flag on {n} snapshot(s)")
@@ -1125,213 +1535,135 @@ def reset_cooldown():
 
 @app.post("/api/set-phase")
 def set_phase(body: dict = Body(default={})):
-    """
-    Apply a named portfolio phase preset, writing portfolio_phase to options.json.
-
-    Request body: {"phase": "Momentum-Max"}   (or "Balanced Growth" / "Pre-Retirement")
-
-    The preset immediately sets group allocations, CVaR limit, cost filter,
-    rebalance cooldown, and VIX high threshold for the next snapshot.
-    The change is also reflected in the HA add-on Configuration tab.
-
-    Returns the full preset so the caller can display what was applied.
+    """Apply a named portfolio phase preset.
+    Also auto-enables use_group_weights and resets the rebalance cooldown.
+    Body: {"phase": "Momentum-Max"}
     """
     phase = body.get("phase", "").strip()
     if not phase:
-        raise HTTPException(400, "Request body must contain {\"phase\": \"<name>\"}")
+        raise HTTPException(400, 'Request body must contain {"phase": "<name>"}')
     if phase not in PHASE_SETTINGS:
-        raise HTTPException(
-            400,
-            f"Unknown phase '{phase}'. Valid values: {list(PHASE_SETTINGS.keys())}"
-        )
+        raise HTTPException(400, f"Unknown phase '{phase}'. Valid: {list(PHASE_SETTINGS.keys())}")
 
     opts = _read_options()
-    opts["portfolio_phase"] = phase
+    opts["portfolio_phase"]  = phase
+    opts["use_group_weights"] = True   # auto-enable on phase change
     try:
         _write_options(opts)
     except Exception as exc:
         raise HTTPException(500, f"Failed to write options.json: {exc}")
 
+    # Reset cooldown
+    conn = get_db()
+    n    = conn.execute("UPDATE snapshots SET executed=0, executed_at=NULL WHERE executed=1").rowcount
+    conn.commit()
+    conn.close()
+
     preset = PHASE_SETTINGS[phase]
-    log.info(
-        f"Phase set to '{phase}': "
-        f"CVaR={preset['max_cvar_pct']}%  cost={preset['cost_rate_pct']}%  "
-        f"cooldown={preset['min_days_between_rebalance']}d  "
-        f"vix_high={preset['vix_high_threshold']}"
-    )
-    return {"phase": phase, "settings": preset}
+    log.info(f"Phase set to '{phase}': CVaR={preset['max_cvar_pct']}%  "
+             f"cost={preset['cost_rate_pct']}%  cooldown={preset['min_days_between_rebalance']}d  "
+             f"vix_high={preset['vix_high_threshold']}  cooldown_reset={n} snapshots")
+    return {"phase": phase, "settings": preset, "use_group_weights": True, "cooldown_reset": n}
 
 
-@app.post("/api/sync-from-t212")
-def sync_from_t212(preview: bool = False):
+@app.get("/api/groups")
+def get_groups():
+    """List all instrument group assignments, sorted by group then yahoo_symbol."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM instrument_groups ORDER BY group_label='unassigned' DESC, yahoo_symbol ASC"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/groups/{ticker}")
+def set_group(ticker: str, body: dict = Body(default={})):
+    """Set the group label for an instrument.
+    Body: {"group": "momentum_core"}
     """
-    Sync the holdings list from the live T212 portfolio.
+    from urllib.parse import unquote
+    ticker = unquote(ticker)
+    group  = body.get("group", "").strip()
+    if group not in VALID_GROUPS:
+        raise HTTPException(400, f"Invalid group '{group}'. Valid: {VALID_GROUPS}")
 
-    Behaviour
-    ─────────
-    • Existing holdings   — purchase_qty and purchase_price updated from T212.
-                            target_weight, group, and yahoo_symbol are preserved.
-    • New holdings        — added automatically.  target_weight is set to the
-                            holding's actual current weight in the T212 portfolio
-                            so the portfolio starts balanced.  group defaults to
-                            'global_beta' — edit it in the add-on options UI.
-    • Removed holdings    — present in config but zero / absent in T212 (sold).
-                            Dropped from the holdings list so they stop affecting
-                            rebalance calculations.
+    conn = get_db()
+    row  = conn.execute("SELECT 1 FROM instrument_groups WHERE t212_ticker=?", (ticker,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, f"Instrument '{ticker}' not found in instrument_groups")
 
-    The updated holdings list is written back to /data/options.json, which is
-    read by the HA add-on configuration UI — open the add-on options page to
-    review and assign groups to any newly discovered holdings.
-
-    Valid group values: momentum_core, global_beta, regional_satellite,
-                        defensive, optional_factor
-
-    Pass ?preview=true to see what would change without writing anything.
-    """
-    cfg = load_config()
-    if not cfg["t212_token"]:
-        raise HTTPException(400, "t212_token not configured — cannot sync from T212")
-
-    # ── Fetch live positions ───────────────────────────────────────────────────
-    try:
-        r = requests.get(
-            f"{cfg['t212_base']}/api/v0/equity/portfolio",
-            headers=_t212_headers(cfg), timeout=20,
-        )
-        r.raise_for_status()
-        t212_positions: list = r.json()
-    except Exception as exc:
-        raise HTTPException(502, f"T212 portfolio fetch failed: {exc}")
-
-    log.info(f"T212 sync: {len(t212_positions)} position(s) from API")
-
-    # ── Calculate total portfolio value for weight derivation ─────────────────
-    # Uses currentPrice if available, falls back to averagePrice.
-    total_value = sum(
-        float(pos.get("quantity", 0))
-        * float(pos.get("currentPrice") or pos.get("averagePrice") or 0)
-        for pos in t212_positions
-        if float(pos.get("quantity", 0)) > 0
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "UPDATE instrument_groups SET group_label=?, updated_at=? WHERE t212_ticker=?",
+        (group, now, ticker),
     )
+    conn.commit()
+    updated = dict(conn.execute(
+        "SELECT * FROM instrument_groups WHERE t212_ticker=?", (ticker,)
+    ).fetchone())
+    conn.close()
+    log.info(f"Group set: {ticker} → {group}")
+    return updated
 
-    # ── Build lookup from current config ──────────────────────────────────────
-    opts = _read_options()
-    existing_holdings      = opts.get("holdings", DEFAULT_HOLDINGS)
-    existing_by_t212: dict = {h["t212_ticker"]: h for h in existing_holdings}
 
-    new_holdings: list = []
-    updated:      list = []
-    added:        list = []
-    removed:      list = []
-    t212_seen:    set  = set()
-
-    for pos in t212_positions:
-        t212_ticker   = pos.get("ticker", "")
-        quantity      = float(pos.get("quantity", 0))
-        average_price = float(pos.get("averagePrice") or 0)
-        current_price = float(pos.get("currentPrice") or average_price)
-        fill_date     = pos.get("initialFillDate", "")
-
-        if not t212_ticker or quantity <= 0:
-            continue
-        t212_seen.add(t212_ticker)
-
-        if t212_ticker in existing_by_t212:
-            # ── Known holding — preserve strategy fields, update cost basis ───
-            h = dict(existing_by_t212[t212_ticker])
-            old_qty   = float(h.get("purchase_qty",   0))
-            old_price = float(h.get("purchase_price", 0))
-            h["purchase_qty"]   = round(quantity, 6)
-            h["purchase_price"] = round(average_price, 4)
-            new_holdings.append(h)
-            qty_changed   = abs(old_qty   - quantity)      > 0.000001
-            price_changed = abs(old_price - average_price) > 0.001
-            if qty_changed or price_changed:
-                updated.append({
-                    "t212_ticker":  t212_ticker,
-                    "yahoo_symbol": h["yahoo_symbol"],
-                    "old_qty":      round(old_qty,   6),
-                    "new_qty":      round(quantity,  6),
-                    "old_price":    round(old_price,     4),
-                    "new_price":    round(average_price, 4),
-                })
-                log.info(f"  Sync updated: {t212_ticker}  "
-                         f"qty {old_qty:.4f}→{quantity:.4f}  "
-                         f"price {old_price:.4f}→{average_price:.4f}")
-        else:
-            # ── New holding — derive yahoo symbol and calculate actual weight ─
-            yahoo_sym    = _t212_ticker_to_yahoo(t212_ticker)
-            market_value = quantity * current_price
-            actual_wt    = round(market_value / total_value * 100, 2) if total_value else 0.0
-            h = {
-                "yahoo_symbol":  yahoo_sym,
-                "t212_ticker":   t212_ticker,
-                "target_weight": actual_wt,   # start balanced at current weight
-                "purchase_price": round(average_price, 4),
-                "purchase_qty":   round(quantity, 6),
-                "group":          "global_beta",  # edit in add-on options UI
-            }
-            new_holdings.append(h)
-            added.append({
-                "t212_ticker":   t212_ticker,
-                "yahoo_symbol":  yahoo_sym,
-                "qty":           round(quantity, 6),
-                "avg_price":     round(average_price, 4),
-                "target_weight": actual_wt,
-                "group":         "global_beta",
-                "fill_date":     fill_date,
-                "note": (
-                    "Added with group='global_beta' and target_weight set to current "
-                    "portfolio weight. Edit group in the add-on options UI. "
-                    f"Valid groups: {', '.join(VALID_GROUPS)}"
-                ),
-            })
-            log.info(f"  Sync new: {t212_ticker} → {yahoo_sym}  "
-                     f"qty={quantity:.4f}  wt={actual_wt:.1f}%  group=global_beta")
-
-    # ── Holdings in config no longer in T212 (sold / closed) ──────────────────
-    for h in existing_holdings:
-        if h["t212_ticker"] not in t212_seen:
-            removed.append({
-                "t212_ticker":  h["t212_ticker"],
-                "yahoo_symbol": h["yahoo_symbol"],
-                "note": "Zero/absent in T212 portfolio — removed from holdings config",
-            })
-            log.info(f"  Sync removed: {h['t212_ticker']} (not in T212)")
-
-    result = {
-        "preview":          preview,
-        "as_of":            datetime.now(timezone.utc).isoformat(),
-        "t212_positions":   len(t212_seen),
-        "holdings_before":  len(existing_holdings),
-        "holdings_after":   len(new_holdings),
-        "updated":          updated,
-        "added":            added,
-        "removed":          removed,
+@app.get("/api/catalog/status")
+def catalog_status():
+    """Catalog cache info."""
+    conn = get_db()
+    count      = conn.execute("SELECT COUNT(*) FROM instrument_catalog").fetchone()[0]
+    oldest     = conn.execute("SELECT MIN(fetched_at) FROM instrument_catalog").fetchone()[0]
+    conn.close()
+    cfg        = load_config()
+    ttl        = cfg["catalog_cache_ttl_sec"]
+    age_sec    = None
+    next_in    = None
+    if oldest:
+        try:
+            age_sec = int((
+                datetime.now(timezone.utc)
+                - datetime.fromisoformat(oldest.replace("Z", "+00:00"))
+            ).total_seconds())
+            next_in = max(0, ttl - age_sec)
+        except Exception:
+            pass
+    return {
+        "instrument_count": count,
+        "fetched_at":       oldest,
+        "age_sec":          age_sec,
+        "ttl_sec":          ttl,
+        "next_fetch_in_sec": next_in,
     }
 
-    if not preview:
-        try:
-            opts["holdings"] = new_holdings
-            _write_options(opts)
-            log.info(
-                f"Sync written to options.json — "
-                f"{len(new_holdings)} holdings  "
-                f"({len(updated)} updated, {len(added)} added, {len(removed)} removed)"
-            )
-            result["written"] = True
-        except Exception as exc:
-            raise HTTPException(500, f"Failed to write options.json: {exc}")
 
-    return result
+@app.post("/api/catalog/refresh")
+def catalog_refresh():
+    """Force an immediate catalog re-fetch, bypassing the TTL cache.
+    Use sparingly — T212 rate-limits this endpoint to 1 request per 50 seconds.
+    """
+    cfg = load_config()
+    catalog = fetch_instrument_catalog(cfg, force=True)
+    return {
+        "refreshed":        True,
+        "instrument_count": len(catalog),
+        "as_of":            datetime.now(timezone.utc).isoformat(),
+    }
 
+
+@app.get("/groups", response_class=HTMLResponse)
+def groups_page():
+    """HTML group-management UI. Linked from the HA sidebar ingress panel."""
+    return HTMLResponse(content=_GROUPS_HTML)
+
+
+# ── DB row helper ─────────────────────────────────────────────────────────────
 
 def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     for f in ["positions_json", "benchmarks_json", "drift_json", "momentum_json", "suggested_actions"]:
         key = f.replace("_json", "")
         d[key] = json.loads(d.pop(f) or ("[]" if f == "suggested_actions" else "{}"))
-    # Derive group_summary from positions (avoids DB schema change)
     if "positions" in d and isinstance(d["positions"], list):
         gs: dict = {}
         for p in d["positions"]:
@@ -1341,6 +1673,11 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
             gs[g]["actual_wt"] = round(gs[g]["actual_wt"] + p.get("actual_wt", 0.0), 2)
             gs[g]["target_wt"] = round(gs[g]["target_wt"] + p.get("target_wt", 0.0), 2)
         d["group_summary"] = gs
+    # Count unassigned in live snapshot for HA sensor attribute
+    if "positions" in d and isinstance(d["positions"], list):
+        d["unassigned_count"] = sum(
+            1 for p in d["positions"] if p.get("group") == "unassigned"
+        )
     return d
 
 
@@ -1348,7 +1685,10 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
 
 if __name__ == "__main__":
     init_db()
+    _migrate_groups_from_options()
     cfg = load_config()
-    log.info(f"Portfolio Collector v1.6.1 — {len(cfg['target_weights'])} holdings — "
-             f"DB: {DB_PATH} — T212: {cfg['t212_base']}")
+    log.info(
+        f"Portfolio Collector v2.0.0 — phase={cfg['portfolio_phase']} — "
+        f"DB: {DB_PATH} — T212: {cfg['t212_base']}"
+    )
     uvicorn.run(app, host="0.0.0.0", port=PORT)

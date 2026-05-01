@@ -25,6 +25,7 @@ rest:
           - rebalance_reason
           - approved
           - vix
+          - unassigned_count
 
       - name: "Portfolio Return"
         unique_id: portfolio_return
@@ -221,17 +222,11 @@ rest_command:
     content_type: "application/json"
     timeout: 10
 
-  sync_portfolio_from_t212:
-    url: "http://localhost:8000/api/sync-from-t212"
+  refresh_instrument_catalog:
+    url: "http://localhost:8000/api/catalog/refresh"
     method: POST
     content_type: "application/json"
-    timeout: 30
-
-  preview_t212_sync:
-    url: "http://localhost:8000/api/sync-from-t212?preview=true"
-    method: POST
-    content_type: "application/json"
-    timeout: 30
+    timeout: 60
 
   set_portfolio_phase:
     url: "http://localhost:8000/api/set-phase"
@@ -331,7 +326,23 @@ automation:
           message: >
             Phase settings updated. Group allocations, CVaR limit, cost filter,
             cooldown, and VIX threshold have been reconfigured.
+            Group weighting has been enabled automatically.
             Run a new snapshot to apply the changes to rebalance calculations.
+
+  - id: portfolio_unassigned_instruments
+    alias: "Portfolio: Alert when new unassigned instruments detected"
+    trigger:
+      - platform: template
+        value_template: >
+          {{ state_attr('sensor.portfolio_value', 'unassigned_count') | int(0) > 0 }}
+    action:
+      - service: notify.persistent_notification
+        data:
+          title: "Portfolio: New instruments need group assignment"
+          message: >
+            {{ state_attr('sensor.portfolio_value', 'unassigned_count') }}
+            instrument(s) have no group assigned. Open the Portfolio Groups
+            panel in the sidebar to assign them before the next rebalance.
 
   - id: portfolio_collector_stale_alert
     alias: "Portfolio: Alert if snapshot is stale"

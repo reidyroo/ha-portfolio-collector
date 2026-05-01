@@ -285,32 +285,19 @@ views:
             Approving trades will submit **real orders** to Trading 212.
             Verify the trade plan above before toggling approval.
 
-      # ── T212 sync ─────────────────────────────────────────────────────────
+      # ── Catalog ───────────────────────────────────────────────────────────
       - type: button
-        name: Sync Holdings from T212
-        icon: mdi:cloud-sync
+        name: Refresh Instrument Catalog
+        icon: mdi:database-refresh-outline
         tap_action:
           action: call-service
-          service: rest_command.sync_portfolio_from_t212
+          service: rest_command.refresh_instrument_catalog
           confirmation:
             text: >
-              Pull current quantities and average prices from your T212 account?
-              New holdings will be added with their current portfolio weight as
-              the default target. Sold holdings will be removed. Check the
-              add-on logs and options page afterwards to assign groups to any
-              new holdings (valid groups: momentum_core, global_beta,
-              regional_satellite, defensive, optional_factor).
-
-      - type: button
-        name: Preview T212 Sync (dry run)
-        icon: mdi:cloud-search-outline
-        tap_action:
-          action: call-service
-          service: rest_command.preview_t212_sync
-          confirmation:
-            text: >
-              Run a dry-run sync preview? Nothing will be written.
-              Check the add-on logs to see what would change.
+              Force a fresh catalog fetch from T212? This counts against the
+              API rate limit (1 request per 50 seconds). Only needed if new
+              instruments have been added to your T212 account and are not
+              appearing in snapshots.
 
       - type: button
         name: Run Snapshot Now
@@ -388,6 +375,32 @@ views:
             color: "#FF9800"
             stroke_width: 2
             fill_raw: zero
+
+
+  # ═══════════════════════════════════
+  # View 5: Instrument Groups
+  # ═══════════════════════════════════
+  - title: Groups
+    path: groups
+    icon: mdi:tag-multiple-outline
+    type: masonry
+    cards:
+      - type: markdown
+        content: |
+          ## Instrument Groups
+
+          Assign each holding to a group — groups drive the portfolio phase
+          allocations used for rebalance target weights.
+
+          **New instruments** added to your T212 account appear automatically
+          after the next snapshot and are tagged *Unassigned* until you assign them.
+
+      - type: button
+        name: Open Group Manager
+        icon: mdi:tag-edit-outline
+        tap_action:
+          action: navigate
+          navigation_path: /hassio/ingress/portfolio_collector
             opacity: 0.15
           - entity: sensor.portfolio_alpha_msci
             name: vs MSCI World
