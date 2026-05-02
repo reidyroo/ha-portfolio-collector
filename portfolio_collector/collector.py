@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portfolio Collector — Home Assistant Add-on v2.0.9
+Portfolio Collector — Home Assistant Add-on v2.0.10
 ===================================================
 Monitors a Trading 212 portfolio, computing drift from target weights,
 scoring momentum, benchmarking against major indices, and suggesting
@@ -188,7 +188,7 @@ _T212_EXCHANGE_MAP: list[tuple[str, str]] = [
     ("_US_EQ",   ""),
 ]
 
-app = FastAPI(title="Portfolio Collector", version="2.0.9")
+app = FastAPI(title="Portfolio Collector", version="2.0.10")
 
 
 # ── Ticker utilities ──────────────────────────────────────────────────────────
@@ -1265,7 +1265,7 @@ def compute_snapshot() -> dict:
 
     return {
         "as_of":                as_of,
-        "collector_version":    "2.0.9",
+        "collector_version":    "2.0.10",
         "portfolio_value":      round(total_value, 2),
         "invested_value":       round(total_cost, 2),
         "cash":                 round(cash, 2),
@@ -1581,7 +1581,7 @@ def health():
     return {
         "status":           "ok",
         "utc":              datetime.now(timezone.utc).isoformat(),
-        "version":          "2.0.9",
+        "version":          "2.0.10",
         "t212_base":        opts.get("t212_base", "https://demo.trading212.com"),
         "demo_mode":        "demo" in opts.get("t212_base", "demo"),
         "phase":            opts.get("portfolio_phase", "Momentum-Max"),
@@ -1807,6 +1807,82 @@ def catalog_refresh():
     }
 
 
+@app.post("/api/sync-t212-weights")
+def sync_t212_weights():
+    """Reset initial_weight_pct for every instrument to its CURRENT actual
+    weight in the live T212 portfolio.
+
+    Use this when targets have drifted from reality (e.g. after adding new
+    positions or after a partial-migration anomaly).  After syncing and the
+    next snapshot, drift will be ~0 for every holding — no rebalance fires
+    until the portfolio actually moves away from the new baseline.
+
+    Only affects use_group_weights=False mode.  When use_group_weights=True,
+    targets are derived from phase group allocations and stored weights are
+    not used.
+    """
+    cfg = load_config()
+    positions = fetch_t212_portfolio(cfg)
+    if not positions:
+        raise HTTPException(503, "T212 returned no positions — cannot sync weights")
+    catalog = fetch_instrument_catalog(cfg, force=False)
+
+    # Compute actual weights from live T212 prices × quantities (native currency).
+    # Cross-currency error is acceptable for target-storage purposes; this is the
+    # same approximation used by _seed_new_instruments.
+    total_raw = sum(
+        float(p.get("currentPrice") or p.get("averagePrice") or 0)
+        * float(p.get("quantity") or 0)
+        for p in positions
+        if float(p.get("quantity") or 0) > 0
+    )
+    if total_raw <= 0:
+        raise HTTPException(503, "T212 positions have zero total value")
+
+    now    = datetime.now(timezone.utc).isoformat()
+    conn   = get_db()
+    synced = 0
+    for pos in positions:
+        if float(pos.get("quantity") or 0) <= 0:
+            continue
+        raw_ticker = pos.get("ticker", "")
+        canonical  = _normalize_isa_ticker(raw_ticker, catalog)
+        raw_val    = (
+            float(pos.get("currentPrice") or pos.get("averagePrice") or 0)
+            * float(pos.get("quantity") or 0)
+        )
+        wt = round(raw_val / total_raw * 100, 2)
+
+        # Update under canonical key first, then fall back to raw if migration
+        # hasn't run yet for this instrument.
+        cur = conn.execute(
+            "UPDATE instrument_groups SET initial_weight_pct=?, updated_at=? WHERE t212_ticker=?",
+            (wt, now, canonical),
+        )
+        if cur.rowcount == 0 and canonical != raw_ticker:
+            cur = conn.execute(
+                "UPDATE instrument_groups SET initial_weight_pct=?, updated_at=? WHERE t212_ticker=?",
+                (wt, now, raw_ticker),
+            )
+        if cur.rowcount > 0:
+            synced += 1
+    conn.commit()
+    conn.close()
+
+    log.info(f"sync-t212-weights: refreshed initial_weight_pct on {synced} instrument(s)")
+    return {
+        "synced":    synced,
+        "positions": len(positions),
+        "use_group_weights": cfg["use_group_weights"],
+        "note": (
+            "Run a snapshot to see updated targets."
+            if not cfg["use_group_weights"]
+            else "use_group_weights=True — stored weights are not used; turn it off to apply."
+        ),
+        "as_of":     now,
+    }
+
+
 @app.get("/groups", response_class=HTMLResponse)
 def groups_page():
     """HTML group-management UI. Linked from the HA sidebar ingress panel."""
@@ -1819,7 +1895,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     # Always advertise the running collector version so HA sensors / dashboards
     # can confirm the add-on actually upgraded after a Supervisor update.
-    d["collector_version"] = "2.0.9"
+    d["collector_version"] = "2.0.10"
     for f in ["positions_json", "benchmarks_json", "drift_json", "momentum_json", "suggested_actions"]:
         key = f.replace("_json", "")
         d[key] = json.loads(d.pop(f) or ("[]" if f == "suggested_actions" else "{}"))
@@ -1851,7 +1927,7 @@ if __name__ == "__main__":
     # and ensures the /groups page works behind the ingress proxy.
     ingress_path = os.getenv("INGRESS_PATH", "")
     log.info(
-        f"Portfolio Collector v2.0.9 — phase={cfg['portfolio_phase']} — "
+        f"Portfolio Collector v2.0.10 — phase={cfg['portfolio_phase']} — "
         f"DB: {DB_PATH} — T212: {cfg['t212_base']} — ingress={ingress_path or 'none'}"
     )
     uvicorn.run(app, host="0.0.0.0", port=PORT, root_path=ingress_path)

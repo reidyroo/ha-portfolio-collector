@@ -242,6 +242,12 @@ rest_command:
     content_type: "application/json"
     timeout: 60
 
+  sync_t212_weights:
+    url: "http://localhost:8000/api/sync-t212-weights"
+    method: POST
+    content_type: "application/json"
+    timeout: 60
+
   set_portfolio_phase:
     url: "http://localhost:8000/api/set-phase"
     method: POST

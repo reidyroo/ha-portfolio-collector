@@ -305,6 +305,21 @@ views:
               instruments have been added to your T212 account and are not
               appearing in snapshots.
 
+      # ── Sync T212 Weights ─────────────────────────────────────────────────
+      - type: button
+        name: Sync T212 Weights → Targets
+        icon: mdi:scale-balance
+        tap_action:
+          action: call-service
+          service: rest_command.sync_t212_weights
+          confirmation:
+            text: >
+              Reset every instrument's stored target weight to its current
+              actual weight in T212. After the next snapshot, drift will be
+              ~0% across the board and no rebalance will fire until the
+              portfolio actually moves. Only affects "use_group_weights=False"
+              mode. Continue?
+
       - type: button
         name: Run Snapshot Now
         icon: mdi:refresh
