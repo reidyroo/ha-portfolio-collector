@@ -248,43 +248,33 @@ Supervisor's image cache is stale.
 
 ### Re-sync the package + dashboard YAML
 
-Save this as a script (`/config/sync_portfolio_files.sh`) so you can run it any time:
+A ready-made script lives in the repo: [`sync_portfolio_files.sh`](sync_portfolio_files.sh).
+
+**One-time install:**
 
 ```bash
-#!/bin/bash
-# sync_portfolio_files.sh — pull packages/portfolio.yaml and lovelace/dashboard.yaml
-# from the GitHub repo, preserve any local IP override, then restart HA Core.
-
-set -euo pipefail
-REPO="https://raw.githubusercontent.com/reidyroo/ha-portfolio-collector/main"
-HA_IP="192.168.1.6"   # ← your HA's static LAN IP (or "homeassistant.local")
-
-echo "→ Pulling latest packages/portfolio.yaml ..."
-curl -fsSL "${REPO}/packages/portfolio.yaml" -o /config/packages/portfolio.yaml
-
-echo "→ Pulling latest lovelace/dashboard.yaml ..."
-curl -fsSL "${REPO}/lovelace/dashboard.yaml" -o /config/lovelace/dashboard.yaml
-
-# Patch the iframe / button URL to use your local IP if homeassistant.local is unreliable
-if [ "$HA_IP" != "homeassistant.local" ]; then
-    sed -i "s|http://homeassistant.local:8000|http://${HA_IP}:8000|g" \
-        /config/packages/portfolio.yaml \
-        /config/lovelace/dashboard.yaml
-fi
-
-# Quick syntax sanity-check before restarting
-ha core check
-
-echo "→ Restarting HA Core to reload package sensors and dashboard ..."
-ha core restart
-
-echo "✓ Sync complete."
-```
-
-```bash
+curl -fsSL https://raw.githubusercontent.com/reidyroo/ha-portfolio-collector/main/sync_portfolio_files.sh \
+  -o /config/sync_portfolio_files.sh
 chmod +x /config/sync_portfolio_files.sh
-/config/sync_portfolio_files.sh
 ```
+
+**Run it any time** (passing your static IP as an env var so the iframe / dashboard
+button URLs get rewritten to the LAN address):
+
+```bash
+HA_IP=192.168.1.6 /config/sync_portfolio_files.sh
+```
+
+If `homeassistant.local` resolves cleanly on your network, leave `HA_IP` unset — the
+upstream URLs will be kept as-is.
+
+The script does:
+
+1. `curl` the latest `packages/portfolio.yaml` to `/config/packages/portfolio.yaml`
+2. `curl` the latest `lovelace/dashboard.yaml` to `/config/lovelace/dashboard.yaml`
+3. `sed` rewrite `homeassistant.local` → `$HA_IP` in both files (if `HA_IP` is set)
+4. `ha core check` to catch YAML errors before restarting
+5. `ha core restart` to reload package sensors, REST commands, and the dashboard
 
 ### Verify after sync
 
