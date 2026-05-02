@@ -4,6 +4,134 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [2.1.0] — 2026-05-02
+
+### Promoted
+- v2.1.0 marks the steady-state release after the 2.0.1 → 2.0.13 stabilisation series.
+  README + CHANGELOG fully rewritten to document T212-as-source-of-truth, group manager,
+  phase presets, two target-weight modes, validator + recovery safeguards, and the
+  diagnostics curl cookbook.
+
+### Same code as 2.0.13
+- All v2.0.13 features (target validator, last-good-targets recovery, equal-weight
+  fallback, `/api/last-good-targets`) carried forward unchanged.
+
+---
+
+## [2.0.13] — 2026-05-02
+
+### Added
+- **Snapshot target validator** — three-rule sanity check on every snapshot:
+  rejects targets where any active holding (≥0.5% actual) has target=0; where
+  target sum is outside 100% ± 2pp; or where any group with active holdings
+  has zero total target. Prevents the partial-data leak that caused
+  liquidate-everything trade plans on earlier versions.
+- **`last_good_targets` recovery table** — every passing snapshot persists its
+  target weights as the recovery baseline. On a future failed validation, the
+  bad targets are silently replaced with the last-known-good ones in-memory,
+  drift recomputed, snapshot saved with sane numbers. Logged loudly.
+- **Equal-weight last-resort fallback** — if validation fails AND no recovery
+  baseline exists, each holding gets `100/n%` rather than the broken numbers.
+- `GET /api/last-good-targets` — inspect the validator recovery baseline.
+
+## [2.0.12] — 2026-05-02
+
+### Fixed
+- **`POST /api/sync-t212-weights` now uses GBP-converted weights** from the
+  latest snapshot's `actual_wt` instead of raw T212 native-currency prices.
+  Mixed-currency portfolios (LSE GBX + GBP holdings) were previously skewed
+  ~100× toward whichever currency dominated. Snapshot must now exist first.
+
+## [2.0.11] — 2026-05-02
+
+### Fixed
+- **Bare `_EQ` T212 tickers** (e.g. `IITU_EQ`, `IWFM_EQ`) now resolve to `.L`
+  Yahoo symbols. T212 ISA accounts return some instruments without an exchange
+  code at all; previously these became bare `IITU` / `IWFM` and 404'd Yahoo.
+  Both `_t212_ticker_to_yahoo` and `_validate_yahoo_symbol` apply the rule.
+
+## [2.0.10] — 2026-05-02
+
+### Added
+- **`POST /api/sync-t212-weights`** — one-button reset of stored target weights
+  to current T212 actual weights. Drift returns to ~0 with no rebalance fire.
+- **`rest_command.sync_t212_weights`** + **Sync T212 Weights → Targets**
+  dashboard button.
+
+## [2.0.9] — 2026-05-02
+
+### Added
+- **`collector_version` field** in every snapshot response and as a
+  `sensor.portfolio_value` attribute. Dashboard banner displays it so the user
+  can verify the add-on actually upgraded after a Supervisor update.
+- **Direct-URL Open Group Manager button** (`http://<host>:8000/groups`) —
+  works without `panel_iframe` registration or ingress. Survives reinstalls
+  and HA cache state.
+
+## [2.0.8] — 2026-05-02
+
+### Fixed
+- **Phase preset and `use_group_weights` are now independent.** A named phase
+  applies guard-rails only (CVaR, cost filter, VIX threshold, cooldown).
+  Group-based weight derivation is a separate decision. Reverts the v2.0.7
+  forced-True coupling.
+- `POST /api/set-phase` no longer auto-enables `use_group_weights`.
+
+## [2.0.7] — 2026-05-02 *(superseded by 2.0.8)*
+
+### Fixed
+- `_compute_target_weights`: fall back to equal weight when *any* instrument
+  has `initial_weight_pct = 0`. Stops 0% targets leaking through when DB key
+  migration is partial.
+
+## [2.0.6] — 2026-05-02
+
+### Fixed
+- **`_validate_yahoo_symbol`** post-processor catches bare Yahoo symbols
+  (e.g. `IITU` for an LSE-listed ETF whose catalog entry has a blank/unknown
+  exchange) and adds the missing `.L` suffix using the canonical T212 ticker.
+  Applied at both snapshot time and instrument seeding.
+- `pct_change(fill_method=None)` silences pandas FutureWarning in momentum
+  and CVaR calculations.
+
+## [2.0.5] — 2026-05-02
+
+### Changed
+- Version bump to force Supervisor update detection after cache issues.
+
+## [2.0.4] — 2026-05-02
+
+### Fixed
+- `_seed_new_instruments`: 3-case logic (canonical exists / compact key only /
+  brand new) correctly migrates compact DB keys (`IITUl_EQ`) to canonical form
+  (`IITU_EQ_XLON`), preserves group assignments, and removes stale duplicates.
+- UPDATE path now sets `initial_weight_pct = approx_wt` when stored value is 0,
+  fixing v2.0.3 where pre-existing instruments never had their weight populated.
+
+## [2.0.3] — 2026-05-02
+
+### Added
+- **`initial_weight_pct` column** in `instrument_groups` — captures each
+  instrument's actual T212 weight at first snapshot. When `use_group_weights=false`,
+  these are used as targets so day-one drift = 0 on a fresh install.
+- **Default `portfolio_phase: "Momentum-Chill"`** for new installs.
+- **`panel_iframe` Portfolio Groups sidebar entry** — works without HA ingress.
+
+## [2.0.2] — 2026-05-02
+
+### Fixed
+- **Ingress redirect** — `GET /` includes the HA ingress `root_path` prefix in
+  the redirect target, so Open Web UI no longer 404s.
+
+## [2.0.1] — 2026-05-02
+
+### Fixed
+- **ISA compact ticker `.L` resolution** — `VWRLl_EQ` → `VWRL.L` etc., applied
+  at both display and Yahoo-fetch sites.
+- `panel_iframe` registration via packages YAML.
+
+---
+
 ## [2.0.0] — 2026-05-01
 
 ### Changed — breaking
