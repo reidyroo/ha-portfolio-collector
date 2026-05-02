@@ -218,6 +218,112 @@ Snapshots run automatically at **20:00 UK time on weekdays** (post-market close)
 
 ---
 
+## Updating
+
+Three things can move when a new release is published:
+
+1. The **add-on** itself (`portfolio_collector/collector.py`, `config.yaml`, `Dockerfile`)
+2. The **HA package YAML** (`packages/portfolio.yaml`) — sensors, REST commands, automations, panel_iframe
+3. The **dashboard YAML** (`lovelace/dashboard.yaml`) — Lovelace card definitions
+
+The add-on updates via the Supervisor UI (or `ha addons rebuild ...`). The two YAML files
+live in your `/config/` directory and need to be re-pulled from the repo whenever they
+change. Watch the [CHANGELOG](CHANGELOG.md) — entries that mention dashboard buttons,
+sensors, REST commands, or sidebar panels mean those files have moved and need re-syncing.
+
+### Update the add-on
+
+```bash
+# Force a clean rebuild — bypasses any cached image layer
+ha addons rebuild 54e2df00_portfolio_collector
+ha addons restart 54e2df00_portfolio_collector
+
+# Confirm the new version is actually running
+curl -s http://$HA_IP:8000/api/health | python3 -c "import sys,json; print('v'+json.load(sys.stdin)['version'])"
+```
+
+If "Update available" appears in the Add-on Store before you do this, the regular Update
+button works too — but `ha addons rebuild` is the one that always picks up changes when
+Supervisor's image cache is stale.
+
+### Re-sync the package + dashboard YAML
+
+Save this as a script (`/config/sync_portfolio_files.sh`) so you can run it any time:
+
+```bash
+#!/bin/bash
+# sync_portfolio_files.sh — pull packages/portfolio.yaml and lovelace/dashboard.yaml
+# from the GitHub repo, preserve any local IP override, then restart HA Core.
+
+set -euo pipefail
+REPO="https://raw.githubusercontent.com/reidyroo/ha-portfolio-collector/main"
+HA_IP="192.168.1.6"   # ← your HA's static LAN IP (or "homeassistant.local")
+
+echo "→ Pulling latest packages/portfolio.yaml ..."
+curl -fsSL "${REPO}/packages/portfolio.yaml" -o /config/packages/portfolio.yaml
+
+echo "→ Pulling latest lovelace/dashboard.yaml ..."
+curl -fsSL "${REPO}/lovelace/dashboard.yaml" -o /config/lovelace/dashboard.yaml
+
+# Patch the iframe / button URL to use your local IP if homeassistant.local is unreliable
+if [ "$HA_IP" != "homeassistant.local" ]; then
+    sed -i "s|http://homeassistant.local:8000|http://${HA_IP}:8000|g" \
+        /config/packages/portfolio.yaml \
+        /config/lovelace/dashboard.yaml
+fi
+
+# Quick syntax sanity-check before restarting
+ha core check
+
+echo "→ Restarting HA Core to reload package sensors and dashboard ..."
+ha core restart
+
+echo "✓ Sync complete."
+```
+
+```bash
+chmod +x /config/sync_portfolio_files.sh
+/config/sync_portfolio_files.sh
+```
+
+### Verify after sync
+
+```bash
+# Add-on version
+curl -s http://$HA_IP:8000/api/health | python3 -c "import sys,json; d=json.load(sys.stdin); print('v'+d['version'])"
+
+# Package YAML has the latest REST commands
+grep -c "sync_t212_weights" /config/packages/portfolio.yaml   # ≥ 1
+
+# Dashboard YAML has the latest buttons
+grep -c "Sync T212 Weights" /config/lovelace/dashboard.yaml   # ≥ 1
+
+# HA service registered
+# Developer Tools → Services → search "rest_command.sync_t212_weights" — should appear
+
+# Dashboard banner shows the running version
+# Open the Investment Monitor dashboard → Overview → top markdown card shows
+# "Collector running: vX.Y.Z · Snapshot: ..."
+```
+
+If the dashboard banner is missing or shows an old version after a sync + restart:
+
+- **Hard-refresh the browser** (Ctrl+Shift+R / Cmd+Shift+R) — Lovelace caches aggressively
+- **Force a sensor repoll**: Developer Tools → Services → `homeassistant.update_entity`
+  → entity_id: `sensor.portfolio_value, sensor.portfolio_snapshot` → Call
+
+### Per-release upgrade ritual
+
+When you see a new version on the repo:
+
+1. Read the [CHANGELOG](CHANGELOG.md) entry for that version
+2. Run `ha addons rebuild ...` (always)
+3. Run `/config/sync_portfolio_files.sh` (only when the changelog mentions dashboard /
+   package / sensor / automation changes — the typical cadence is every few releases)
+4. Verify the version banner on the dashboard
+
+---
+
 ## ETF groups
 
 | Group key | Label | Purpose |
