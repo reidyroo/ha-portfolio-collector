@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portfolio Collector — Home Assistant Add-on v2.0.12
+Portfolio Collector — Home Assistant Add-on v2.0.13
 ===================================================
 Monitors a Trading 212 portfolio, computing drift from target weights,
 scoring momentum, benchmarking against major indices, and suggesting
@@ -188,7 +188,7 @@ _T212_EXCHANGE_MAP: list[tuple[str, str]] = [
     ("_US_EQ",   ""),
 ]
 
-app = FastAPI(title="Portfolio Collector", version="2.0.12")
+app = FastAPI(title="Portfolio Collector", version="2.0.13")
 
 
 # ── Ticker utilities ──────────────────────────────────────────────────────────
@@ -361,6 +361,16 @@ def init_db():
             group_label        TEXT NOT NULL DEFAULT 'unassigned',
             initial_weight_pct REAL NOT NULL DEFAULT 0,
             updated_at         TEXT NOT NULL
+        );
+
+        -- Frozen "last known good" target weights — written ONLY when a snapshot
+        -- passes the target-validation safeguard.  Used to recover automatically
+        -- when a future snapshot computes nonsense targets.
+        CREATE TABLE IF NOT EXISTS last_good_targets (
+            t212_ticker  TEXT PRIMARY KEY,
+            symbol       TEXT NOT NULL,
+            target_wt    INTEGER NOT NULL,
+            saved_at     TEXT NOT NULL
         );
     """)
     # Migration: add initial_weight_pct to existing DBs that predate 2.0.3
@@ -578,6 +588,103 @@ def _round_weights_to_integers(raw: dict[str, float]) -> dict[str, int]:
     for sym in sorted(remainders, key=remainders.__getitem__, reverse=True)[:deficit]:
         floors[sym] += 1
     return floors
+
+
+def _validate_targets(positions: list) -> tuple[bool, str]:
+    """Sanity-check computed target weights against actual portfolio positions.
+
+    Returns (ok, reason).  Failure modes that should NOT be silently written
+    to the snapshot:
+
+      • Any active holding (actual_wt ≥ 0.5%) with target_wt = 0
+        — almost always a partial-data bug; would trigger a full liquidation
+        suggestion on the next rebalance.
+      • Target weights summing to anything other than 100% (within ±2pp
+        rounding tolerance).
+      • Any group has zero total target while it contains active holdings.
+
+    The caller decides what to do on failure (typically: restore last-good
+    targets or fall back to equal weight, then re-derive drift).
+    """
+    if not positions:
+        return False, "no positions"
+
+    # Rule 1: no active position can have target=0
+    for p in positions:
+        if p.get("actual_wt", 0) >= 0.5 and p.get("target_wt", 0) == 0:
+            return False, (
+                f"{p.get('symbol', '?')} has actual_wt={p['actual_wt']:.2f}% "
+                f"but target_wt=0 — partial-data leak"
+            )
+
+    # Rule 2: targets must sum to ~100
+    total_target = sum(p.get("target_wt", 0) for p in positions)
+    if abs(total_target - 100) > 2:
+        return False, f"target sum = {total_target}% (expected ~100%)"
+
+    # Rule 3: any group with active holdings must have a non-zero group total
+    group_totals: dict[str, float] = {}
+    group_actuals: dict[str, float] = {}
+    for p in positions:
+        g = p.get("group", "unassigned")
+        group_totals[g]  = group_totals.get(g, 0)  + p.get("target_wt", 0)
+        group_actuals[g] = group_actuals.get(g, 0) + p.get("actual_wt", 0)
+    for g, actual_total in group_actuals.items():
+        if actual_total >= 1.0 and group_totals.get(g, 0) == 0:
+            return False, (
+                f"group '{g}' actual={actual_total:.1f}% but target=0 — "
+                "all instruments in group lost their target"
+            )
+
+    return True, "ok"
+
+
+def _save_last_good_targets(positions: list) -> None:
+    """Persist current target weights as the recovery baseline.
+    Called only after a snapshot passes _validate_targets.
+    """
+    now  = datetime.now(timezone.utc).isoformat()
+    conn = get_db()
+    try:
+        conn.execute("DELETE FROM last_good_targets")
+        for p in positions:
+            conn.execute(
+                """INSERT INTO last_good_targets (t212_ticker, symbol, target_wt, saved_at)
+                   VALUES (?, ?, ?, ?)""",
+                (p["t212_ticker"], p["symbol"], p["target_wt"], now),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _restore_last_good_targets(positions: list) -> bool:
+    """Overwrite each position's target_wt from last_good_targets, in-place.
+    Returns True if every position was matched.  Mutates positions to also
+    refresh drift_abs / drift_rel after the target change.
+    """
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT t212_ticker, target_wt FROM last_good_targets"
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        return False
+    by_ticker = {r["t212_ticker"]: int(r["target_wt"]) for r in rows}
+    for p in positions:
+        if p["t212_ticker"] not in by_ticker:
+            return False  # Holdings list has changed since last good — can't restore
+    for p in positions:
+        new_target     = by_ticker[p["t212_ticker"]]
+        actual_wt      = p.get("actual_wt", 0.0)
+        p["target_wt"] = new_target
+        p["drift_abs"] = round(actual_wt - new_target, 2)
+        p["drift_rel"] = round(
+            (actual_wt - new_target) / new_target * 100 if new_target else 0.0, 2
+        )
+    return True
 
 
 def _compute_target_weights(holdings: list, cfg: dict) -> dict[str, int]:
@@ -1151,6 +1258,35 @@ def compute_snapshot() -> dict:
         p["drift_abs"] = round(drift_abs, 2)
         p["drift_rel"] = round(drift_rel, 2)
 
+    # ── Target-weight safeguard ────────────────────────────────────────────────
+    # Validate the computed targets against the live actual weights.  If the
+    # validator rejects them (e.g. an active holding got target=0 due to a
+    # partial-data bug), recover from the last known good targets, or fall
+    # back to equal weight if no recovery snapshot exists.  This stops bad
+    # rebalance suggestions from ever leaving the snapshot pipeline.
+    ok, reason = _validate_targets(positions)
+    if not ok:
+        log.error(f"Target validation FAILED: {reason}")
+        if _restore_last_good_targets(positions):
+            log.warning("Recovered targets from last_good_targets table")
+        else:
+            n = len(positions)
+            equal = _round_weights_to_integers({p["symbol"]: 100.0 / n for p in positions})
+            for p in positions:
+                new_target     = equal[p["symbol"]]
+                p["target_wt"] = new_target
+                p["drift_abs"] = round(p["actual_wt"] - new_target, 2)
+                p["drift_rel"] = round(
+                    (p["actual_wt"] - new_target) / new_target * 100 if new_target else 0.0, 2
+                )
+            log.warning(f"No last-good targets available — fell back to equal weight ({100/n:.1f}% each)")
+    else:
+        # Targets are sane — persist as the new recovery baseline
+        try:
+            _save_last_good_targets(positions)
+        except Exception as exc:
+            log.warning(f"Could not persist last_good_targets: {exc}")
+
     max_drift_rel = max((abs(p["drift_rel"]) for p in positions), default=0.0)
     total_cost    = sum(p["cost_basis"] for p in positions)
     portfolio_return_pct = (total_value - total_cost) / total_cost * 100 if total_cost else 0.0
@@ -1275,7 +1411,7 @@ def compute_snapshot() -> dict:
 
     return {
         "as_of":                as_of,
-        "collector_version":    "2.0.12",
+        "collector_version":    "2.0.13",
         "portfolio_value":      round(total_value, 2),
         "invested_value":       round(total_cost, 2),
         "cash":                 round(cash, 2),
@@ -1591,7 +1727,7 @@ def health():
     return {
         "status":           "ok",
         "utc":              datetime.now(timezone.utc).isoformat(),
-        "version":          "2.0.12",
+        "version":          "2.0.13",
         "t212_base":        opts.get("t212_base", "https://demo.trading212.com"),
         "demo_mode":        "demo" in opts.get("t212_base", "demo"),
         "phase":            opts.get("portfolio_phase", "Momentum-Max"),
@@ -1888,6 +2024,22 @@ def sync_t212_weights():
     }
 
 
+@app.get("/api/last-good-targets")
+def get_last_good_targets():
+    """Inspect the frozen last-known-good target weights used as recovery
+    baseline by the snapshot validator.
+    """
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT t212_ticker, symbol, target_wt, saved_at FROM last_good_targets ORDER BY target_wt DESC"
+    ).fetchall()
+    conn.close()
+    return {
+        "count": len(rows),
+        "rows":  [dict(r) for r in rows],
+    }
+
+
 @app.get("/groups", response_class=HTMLResponse)
 def groups_page():
     """HTML group-management UI. Linked from the HA sidebar ingress panel."""
@@ -1900,7 +2052,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     # Always advertise the running collector version so HA sensors / dashboards
     # can confirm the add-on actually upgraded after a Supervisor update.
-    d["collector_version"] = "2.0.12"
+    d["collector_version"] = "2.0.13"
     for f in ["positions_json", "benchmarks_json", "drift_json", "momentum_json", "suggested_actions"]:
         key = f.replace("_json", "")
         d[key] = json.loads(d.pop(f) or ("[]" if f == "suggested_actions" else "{}"))
@@ -1932,7 +2084,7 @@ if __name__ == "__main__":
     # and ensures the /groups page works behind the ingress proxy.
     ingress_path = os.getenv("INGRESS_PATH", "")
     log.info(
-        f"Portfolio Collector v2.0.12 — phase={cfg['portfolio_phase']} — "
+        f"Portfolio Collector v2.0.13 — phase={cfg['portfolio_phase']} — "
         f"DB: {DB_PATH} — T212: {cfg['t212_base']} — ingress={ingress_path or 'none'}"
     )
     uvicorn.run(app, host="0.0.0.0", port=PORT, root_path=ingress_path)
