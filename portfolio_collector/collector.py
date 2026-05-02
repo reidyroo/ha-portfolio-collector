@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portfolio Collector — Home Assistant Add-on v2.0.10
+Portfolio Collector — Home Assistant Add-on v2.0.11
 ===================================================
 Monitors a Trading 212 portfolio, computing drift from target weights,
 scoring momentum, benchmarking against major indices, and suggesting
@@ -188,7 +188,7 @@ _T212_EXCHANGE_MAP: list[tuple[str, str]] = [
     ("_US_EQ",   ""),
 ]
 
-app = FastAPI(title="Portfolio Collector", version="2.0.10")
+app = FastAPI(title="Portfolio Collector", version="2.0.11")
 
 
 # ── Ticker utilities ──────────────────────────────────────────────────────────
@@ -208,7 +208,8 @@ def _base_symbol_from_ticker(ticker: str) -> str:
 def _t212_ticker_to_yahoo(t212_ticker: str) -> str:
     """Derive Yahoo Finance symbol from a T212 ticker using suffix matching.
     Fallback used when the instrument catalog is unavailable.
-    Handles canonical form (VWRL_EQ_XLON) and ISA compact form (VWRLl_EQ).
+    Handles canonical form (VWRL_EQ_XLON), ISA compact (VWRLl_EQ),
+    and bare _EQ (IITU_EQ, IWFM_EQ — T212 sometimes omits the exchange).
     """
     for t212_suffix, yahoo_suffix in _T212_EXCHANGE_MAP:
         if t212_ticker.endswith(t212_suffix):
@@ -217,8 +218,12 @@ def _t212_ticker_to_yahoo(t212_ticker: str) -> str:
     # e.g. "VWRLl_EQ" → VWRL + l (London) → "VWRL.L"
     if t212_ticker.endswith("l_EQ"):
         return t212_ticker[:-4] + ".L"
-    # Generic fallback: strip trailing "_XX" suffix; apply base-symbol cleaner
-    # so that any remaining trailing lowercase exchange char is also removed.
+    # Bare _EQ — T212 ISA returns some instruments without an exchange code
+    # at all (e.g. IITU_EQ, IWFM_EQ).  These are LSE-listed in practice;
+    # default to ".L" rather than dropping the suffix entirely.
+    if t212_ticker.endswith("_EQ"):
+        return t212_ticker[:-3] + ".L"
+    # Last-ditch fallback: strip trailing "_XX" suffix; apply base-symbol cleaner.
     parts = t212_ticker.rsplit("_", 1)
     base  = parts[0] if len(parts) == 2 else t212_ticker
     return _base_symbol_from_ticker(base)
@@ -250,6 +255,11 @@ def _validate_yahoo_symbol(yahoo_sym: str, canonical_ticker: str, exchange: str 
     if exchange in _EXCHANGE_TO_YAHOO_SUFFIX:
         suffix = _EXCHANGE_TO_YAHOO_SUFFIX[exchange]
         return yahoo_sym + suffix if suffix else yahoo_sym
+
+    # 3. Bare _EQ tickers (T212 ISA sometimes omits the exchange code,
+    #    e.g. IITU_EQ, IWFM_EQ).  London is the safe default for ISA holdings.
+    if canonical_ticker.endswith("_EQ"):
+        return yahoo_sym + ".L"
 
     return yahoo_sym
 
@@ -1265,7 +1275,7 @@ def compute_snapshot() -> dict:
 
     return {
         "as_of":                as_of,
-        "collector_version":    "2.0.10",
+        "collector_version":    "2.0.11",
         "portfolio_value":      round(total_value, 2),
         "invested_value":       round(total_cost, 2),
         "cash":                 round(cash, 2),
@@ -1581,7 +1591,7 @@ def health():
     return {
         "status":           "ok",
         "utc":              datetime.now(timezone.utc).isoformat(),
-        "version":          "2.0.10",
+        "version":          "2.0.11",
         "t212_base":        opts.get("t212_base", "https://demo.trading212.com"),
         "demo_mode":        "demo" in opts.get("t212_base", "demo"),
         "phase":            opts.get("portfolio_phase", "Momentum-Max"),
@@ -1895,7 +1905,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     # Always advertise the running collector version so HA sensors / dashboards
     # can confirm the add-on actually upgraded after a Supervisor update.
-    d["collector_version"] = "2.0.10"
+    d["collector_version"] = "2.0.11"
     for f in ["positions_json", "benchmarks_json", "drift_json", "momentum_json", "suggested_actions"]:
         key = f.replace("_json", "")
         d[key] = json.loads(d.pop(f) or ("[]" if f == "suggested_actions" else "{}"))
@@ -1927,7 +1937,7 @@ if __name__ == "__main__":
     # and ensures the /groups page works behind the ingress proxy.
     ingress_path = os.getenv("INGRESS_PATH", "")
     log.info(
-        f"Portfolio Collector v2.0.10 — phase={cfg['portfolio_phase']} — "
+        f"Portfolio Collector v2.0.11 — phase={cfg['portfolio_phase']} — "
         f"DB: {DB_PATH} — T212: {cfg['t212_base']} — ingress={ingress_path or 'none'}"
     )
     uvicorn.run(app, host="0.0.0.0", port=PORT, root_path=ingress_path)
