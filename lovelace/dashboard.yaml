@@ -10,6 +10,12 @@ views:
     type: masonry
     cards:
 
+      # ── Running collector version (verify add-on actually upgraded) ─────
+      - type: markdown
+        content: |
+          **Collector running:** v{{ state_attr('sensor.portfolio_value', 'collector_version') or 'unknown — run snapshot' }} ·
+          **Snapshot:** {{ state_attr('sensor.portfolio_value', 'as_of') or 'none yet' }}
+
       # ── Header: value / return / cash / VIX ──────────────────────────────
       - type: glance
         title: Portfolio Summary
@@ -406,8 +412,8 @@ views:
         name: Open Group Manager
         icon: mdi:tag-edit-outline
         tap_action:
-          action: navigate
-          navigation_path: /portfolio_groups
+          action: url
+          url_path: "http://homeassistant.local:8000/groups"
 
       - type: glance
         title: Returns Since Purchase (%)

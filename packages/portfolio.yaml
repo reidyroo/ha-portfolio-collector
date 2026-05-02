@@ -31,6 +31,7 @@ rest:
         value_template: "{{ value_json.portfolio_value | round(2) }}"
         json_attributes:
           - as_of
+          - collector_version
           - portfolio_return_pct
           - invested_value
           - cash
