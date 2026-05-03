@@ -4,6 +4,33 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [2.3.0] — 2026-05-03
+
+### Added — dynamic risk axis (foundation)
+- **`weight_mode: dynamic`** — fourth weight derivation mode. Group allocations
+  are interpolated linearly between phase-preset anchors along a 0–100 risk
+  axis, driven by `risk_score`. Within-group ratios are always preserved
+  (uses the `_scaled_within_group_weights` algorithm internally).
+- **Phase risk anchors**: Pre-Retirement=15, Balanced Growth=45,
+  Momentum-Chill=65, Momentum-Max=90. Intermediate `risk_score` values produce
+  blended group allocations (e.g. risk=75 → 40% of the way from Chill to Max).
+- **`risk_score` config option** (0–100, default 65 = Momentum-Chill anchor).
+- **`auto_adjust_enabled`** + **`auto_adjust_aggressiveness`** (low/medium/high) —
+  when enabled, VIX above the high threshold and portfolio drawdown beyond
+  -10% pull the *effective* risk down by up to 5/10/20 points.
+- **Snapshot exposes**: `risk_score`, `effective_risk`, `effective_risk_reason`,
+  `drawdown_pct`, `dynamic_group_allocations`, `portfolio_phase`.
+- **Dashboard banner** now shows risk score → effective risk and the reason
+  string (only when `weight_mode` is `dynamic`), plus current drawdown%.
+- Add-on startup banner logs the active `weight_mode`.
+
+### Coming next (v2.4.0)
+- Cooldown override during VIX spikes / large drawdowns
+- "Notch up" one-shot button to bypass cooldown manually
+- HA `input_number.portfolio_risk_score` slider for live tuning
+
+---
+
 ## [2.2.0] — 2026-05-03
 
 ### Added

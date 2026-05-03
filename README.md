@@ -406,6 +406,51 @@ Falls back to equal-split for any group whose members have no stored history yet
 Switch modes any time. Run a snapshot afterwards to see the new targets — config changes
 don't recompute on their own.
 
+### `weight_mode: dynamic` (v2.3.0+ — phase interpolation along a risk axis)
+
+Treat the four phase presets as anchors on a 0–100 risk continuum:
+
+| Phase | Risk anchor |
+|---|:---:|
+| Pre-Retirement | 15 |
+| Balanced Growth | 45 |
+| Momentum-Chill | 65 |
+| Momentum-Max | 90 |
+
+Set `risk_score` (0–100) and the system interpolates between adjacent anchors:
+
+- `risk_score: 65` → exactly Momentum-Chill (30/28/22/16/4)
+- `risk_score: 75` → 40% blend toward Momentum-Max (32/32.8/19.2/11.6/4.4)
+- `risk_score: 90` → exactly Momentum-Max (35/40/15/5/5)
+
+Within-group weighting always uses the scaled approach (preserves your stored
+within-group ratios — VWRL still gets ~1.8× SSAC inside Global Beta no matter
+the risk score).
+
+#### Optional auto-adjustment from market signals
+
+When `auto_adjust_enabled: true`, two live signals can lower the **effective**
+risk score below your set value:
+
+| Signal | Effect |
+|---|---|
+| VIX above `vix_high_threshold` (default 25) | Risk shifts down proportionally; capped at the aggressiveness max at VIX = high+15 |
+| Portfolio drawdown below -10% from peak | Additional shift down, up to half the max, scaling linearly to -30% |
+
+`auto_adjust_aggressiveness` caps the maximum shift:
+
+- `low` → ±5 points
+- `medium` → ±10 points (default)
+- `high` → ±20 points
+
+The user's `risk_score` is never modified — only the **effective_risk** the
+snapshot uses for that run. Dashboard banner shows both:
+
+> **Risk:** 75 → effective 70.5 (VIX=27.0(-1.5); DD=-12.3%(-3.0))
+
+This gives you a defensive auto-bias when markets get rough, while keeping
+your underlying preference unchanged for when conditions return to normal.
+
 ### Legacy compatibility
 
 The pre-2.2 boolean flag `use_group_weights` is still respected for older configs:

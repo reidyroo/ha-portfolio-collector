@@ -13,10 +13,15 @@ views:
       # ── Running collector version (verify add-on actually upgraded) ─────
       - type: markdown
         content: |
-          **Collector running:** v{{ state_attr('sensor.portfolio_value', 'collector_version') or 'unknown — run snapshot' }} ·
+          **Collector:** v{{ state_attr('sensor.portfolio_value', 'collector_version') or 'unknown' }} ·
           **Phase:** {{ states('input_select.portfolio_phase') }} ·
-          **Weight mode:** {{ state_attr('sensor.portfolio_value', 'weight_mode') or 'unknown' }} ·
-          **Snapshot:** {{ state_attr('sensor.portfolio_value', 'as_of') or 'none yet' }}
+          **Weight mode:** {{ state_attr('sensor.portfolio_value', 'weight_mode') or 'unknown' }}
+          {% if state_attr('sensor.portfolio_value', 'weight_mode') == 'dynamic' %}
+          · **Risk:** {{ state_attr('sensor.portfolio_value', 'risk_score') }} → effective {{ state_attr('sensor.portfolio_value', 'effective_risk') }}
+          ({{ state_attr('sensor.portfolio_value', 'effective_risk_reason') }})
+          {% endif %}
+          · **Drawdown:** {{ state_attr('sensor.portfolio_value', 'drawdown_pct') }}%
+          · **Snapshot:** {{ state_attr('sensor.portfolio_value', 'as_of') or 'none yet' }}
 
       # ── Header: value / return / cash / VIX ──────────────────────────────
       - type: glance

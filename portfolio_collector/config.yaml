@@ -5,7 +5,7 @@ description: >
   scores momentum, benchmarks against MSCI World / S&P 500 / FTSE 100 / DOW / VIX,
   and suggests rebalance trades for manual approval. No holdings list required —
   T212 is the source of truth.
-version: "2.2.0"
+version: "2.3.0"
 slug: portfolio_collector
 init: false
 url: "https://github.com/YOUR_GITHUB_USERNAME/ha-portfolio-collector"
@@ -52,7 +52,22 @@ options:
   #   "scaled_in_group" — targets = phase group allocation, weighted by stored
   #                       within-group ratio (preserves VWRL:SSAC kind of relationships
   #                       across phase changes)
+  #   "dynamic"         — group allocations interpolated along the 0–100 risk axis
+  #                       from `risk_score` (with optional VIX/drawdown adjustment).
+  #                       Within-group is always scaled (preserves stored ratios).
   weight_mode: "stored"
+
+  # Risk score on a 0–100 axis (only used when weight_mode="dynamic").
+  # Anchors:  Pre-Retirement=15, Balanced Growth=45, Momentum-Chill=65, Momentum-Max=90.
+  # Intermediate values produce linearly-interpolated group allocations.
+  risk_score: 65
+
+  # When true, VIX and portfolio drawdown can shift the EFFECTIVE risk down
+  # from your set risk_score. Caps controlled by auto_adjust_aggressiveness.
+  auto_adjust_enabled: false
+
+  # Maximum auto-shift magnitude (low=5pts, medium=10pts, high=20pts).
+  auto_adjust_aggressiveness: "medium"
 
   # Legacy boolean — kept for backwards compatibility with older configs.
   # If weight_mode is set, this is ignored.  If weight_mode is empty, then
@@ -83,8 +98,11 @@ schema:
   vix_extreme_threshold: int
   min_days_between_rebalance: int
   portfolio_phase: str
-  weight_mode: list(stored|equal_in_group|scaled_in_group)?
+  weight_mode: list(stored|equal_in_group|scaled_in_group|dynamic)?
   use_group_weights: bool?
+  risk_score: int(0,100)?
+  auto_adjust_enabled: bool?
+  auto_adjust_aggressiveness: list(low|medium|high)?
   max_cvar_pct: float
   cost_rate_pct: float
   max_snapshot_change_pct: int

@@ -33,6 +33,12 @@ rest:
           - as_of
           - collector_version
           - weight_mode
+          - portfolio_phase
+          - risk_score
+          - effective_risk
+          - effective_risk_reason
+          - drawdown_pct
+          - dynamic_group_allocations
           - portfolio_return_pct
           - invested_value
           - cash

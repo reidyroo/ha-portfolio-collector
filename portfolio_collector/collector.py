@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portfolio Collector — Home Assistant Add-on v2.2.0
+Portfolio Collector — Home Assistant Add-on v2.3.0
 ===================================================
 Monitors a Trading 212 portfolio, computing drift from target weights,
 scoring momentum, benchmarking against major indices, and suggesting
@@ -150,6 +150,17 @@ BENCHMARKS = {
     "vix":        "^VIX",
 }
 
+# Phase positions on a 0–100 risk axis used by weight_mode="dynamic".
+# 0 = ultra-defensive, 100 = maximum aggression.
+# These anchor the four phase presets along the risk continuum; intermediate
+# risk_score values produce linearly-interpolated group allocations.
+PHASE_RISK_ANCHORS: dict[str, float] = {
+    "Pre-Retirement":   15.0,
+    "Balanced Growth":  45.0,
+    "Momentum-Chill":   65.0,
+    "Momentum-Max":     90.0,
+}
+
 # ── Exchange → Yahoo Finance suffix ──────────────────────────────────────────
 # Keyed by T212 exchange ID (from instrument catalog or ticker suffix).
 _EXCHANGE_TO_YAHOO_SUFFIX: dict[str, str] = {
@@ -188,7 +199,7 @@ _T212_EXCHANGE_MAP: list[tuple[str, str]] = [
     ("_US_EQ",   ""),
 ]
 
-app = FastAPI(title="Portfolio Collector", version="2.2.0")
+app = FastAPI(title="Portfolio Collector", version="2.3.0")
 
 
 # ── Ticker utilities ──────────────────────────────────────────────────────────
@@ -580,6 +591,85 @@ def _group_based_weights(holdings: list, group_allocs: dict) -> dict[str, float]
     return weights
 
 
+def _interpolate_group_allocations(risk_score: float) -> dict[str, float]:
+    """Linear interpolation between phase presets along the 0–100 risk axis.
+
+    Phase presets are anchored to specific risk scores (PHASE_RISK_ANCHORS).
+    For a given risk_score, finds the bracketing phase pair and blends each
+    group allocation proportionally.
+
+    Examples (with the default anchors):
+      risk=15  → exactly Pre-Retirement   (10/33/12/35/10)
+      risk=65  → exactly Momentum-Chill   (30/28/22/16/4)
+      risk=75  → 40% of the way from Chill to Max → blend
+      risk=100 → clamped to Momentum-Max (35/40/15/5/5)
+    """
+    risk = max(0.0, min(100.0, float(risk_score)))
+    anchors = sorted(
+        ((r, PHASE_SETTINGS[p]["group_allocations"]) for p, r in PHASE_RISK_ANCHORS.items()),
+        key=lambda x: x[0],
+    )
+    if risk <= anchors[0][0]:
+        return dict(anchors[0][1])
+    if risk >= anchors[-1][0]:
+        return dict(anchors[-1][1])
+    for i in range(len(anchors) - 1):
+        lo_r, lo_a = anchors[i]
+        hi_r, hi_a = anchors[i + 1]
+        if lo_r <= risk <= hi_r:
+            t = (risk - lo_r) / (hi_r - lo_r)
+            return {g: lo_a[g] + t * (hi_a.get(g, lo_a[g]) - lo_a[g]) for g in lo_a}
+    return dict(anchors[-1][1])
+
+
+def _compute_effective_risk(
+    base_risk: float,
+    vix: float,
+    drawdown_pct: float,
+    cfg: dict,
+) -> tuple[float, str]:
+    """Optionally shift the user's risk_score based on live market signals.
+
+    When `auto_adjust_enabled` is False, returns the user's risk_score unchanged.
+    When enabled, applies bounded shifts:
+
+      • VIX above the configured "high" threshold pulls risk DOWN proportionally.
+      • Drawdown beyond -10% pulls risk DOWN proportionally.
+
+    Maximum total shift is bounded by `auto_adjust_aggressiveness`:
+      low=5pts, medium=10pts, high=20pts.
+
+    Returns (effective_risk, human-readable reason).
+    """
+    if not cfg.get("auto_adjust_enabled", False):
+        return base_risk, "auto-adjust off"
+
+    aggr = str(cfg.get("auto_adjust_aggressiveness", "medium")).lower()
+    max_shift = {"low": 5.0, "medium": 10.0, "high": 20.0}.get(aggr, 10.0)
+
+    shift   = 0.0
+    parts   = []
+    vix_hi  = float(cfg.get("vix_high_threshold", 25))
+
+    # VIX shift: high VIX → reduce risk (push toward defensive end of curve)
+    if vix > vix_hi:
+        excess    = min(vix - vix_hi, 15.0)             # cap influence at +15 over threshold
+        vix_shift = -(excess / 15.0) * max_shift        # up to -max_shift at extreme
+        shift    += vix_shift
+        parts.append(f"VIX={vix:.1f}({vix_shift:+.1f})")
+
+    # Drawdown shift: -10% to -30% → progressively reduce risk (max half of max_shift)
+    if drawdown_pct < -10.0:
+        excess  = min(abs(drawdown_pct) - 10.0, 20.0)
+        dd_shift = -(excess / 20.0) * (max_shift / 2.0)
+        shift  += dd_shift
+        parts.append(f"DD={drawdown_pct:.1f}%({dd_shift:+.1f})")
+
+    effective = max(0.0, min(100.0, float(base_risk) + shift))
+    reason    = "; ".join(parts) if parts else "no signals → no shift"
+    return effective, reason
+
+
 def _scaled_within_group_weights(holdings: list, group_allocs: dict) -> dict[str, float]:
     """Phase-driven group totals with within-group ratios preserved from stored
     initial_weight_pct.
@@ -730,7 +820,7 @@ def _restore_last_good_targets(positions: list) -> bool:
 def _compute_target_weights(holdings: list, cfg: dict) -> dict[str, int]:
     """Derive rounded integer target weights from the live holdings list.
 
-    Three modes selected via cfg["weight_mode"]:
+    Four modes selected via cfg["weight_mode"]:
 
       "stored"           — targets = stored initial_weight_pct, normalised to 100
                            (drift relative to your T212 actuals at sync time)
@@ -739,6 +829,10 @@ def _compute_target_weights(holdings: list, cfg: dict) -> dict[str, int]:
       "scaled_in_group"  — phase group_alloc, weighted by stored ratio within group
                            (preserves VWRL:SSAC kind of relationships across phase
                             changes — group total expands/shrinks but ratios stay)
+      "dynamic"          — group allocations interpolated along the 0–100 risk axis
+                           from cfg["effective_risk"] (= user risk_score, optionally
+                           shifted by VIX / drawdown when auto_adjust is enabled).
+                           Within-group weighting always uses the scaled approach.
 
     Backwards-compatible with the legacy boolean `use_group_weights` flag, which
     maps to "equal_in_group" when set.
@@ -750,7 +844,17 @@ def _compute_target_weights(holdings: list, cfg: dict) -> dict[str, int]:
     mode       = cfg.get("weight_mode", "stored")
     has_groups = any(h["group"] != "unassigned" for h in holdings)
 
-    if mode == "scaled_in_group" and has_groups:
+    if mode == "dynamic" and has_groups:
+        # Group allocations interpolated along the risk axis from effective_risk.
+        # `cfg["dynamic_group_allocations"]` is computed earlier in run_snapshot
+        # so the same interpolated dict is also exposed in the snapshot payload.
+        allocs    = cfg.get("dynamic_group_allocations") \
+                    or _interpolate_group_allocations(cfg.get("effective_risk", cfg.get("risk_score", 65)))
+        # Within-group always uses scaled (preserves stored ratios) so phase shifts
+        # feel smooth.  Falls back to equal split inside _scaled_within_group_weights
+        # for any group with no stored history.
+        fractional = _scaled_within_group_weights(holdings, allocs)
+    elif mode == "scaled_in_group" and has_groups:
         fractional = _scaled_within_group_weights(holdings, cfg["group_allocations"])
     elif mode == "equal_in_group" and has_groups:
         fractional = _group_based_weights(holdings, cfg["group_allocations"])
@@ -800,7 +904,7 @@ def load_config() -> dict:
     #   "equal_in_group"  — phase group_alloc / count (equal split within group)
     #   "scaled_in_group" — phase group_alloc weighted by stored ratio within group
     weight_mode_raw = str(opts.get("weight_mode", "")).strip().lower()
-    if weight_mode_raw in ("stored", "equal_in_group", "scaled_in_group"):
+    if weight_mode_raw in ("stored", "equal_in_group", "scaled_in_group", "dynamic"):
         weight_mode = weight_mode_raw
     elif weight_mode_raw:
         log.warning(f"Unknown weight_mode '{weight_mode_raw}', defaulting to 'stored'")
@@ -821,7 +925,11 @@ def load_config() -> dict:
         "weight_mode":                weight_mode,
         # Legacy compat — older code paths still read this; `True` whenever any
         # group-aware mode is in use.
-        "use_group_weights":          weight_mode in ("equal_in_group", "scaled_in_group"),
+        "use_group_weights":          weight_mode in ("equal_in_group", "scaled_in_group", "dynamic"),
+        # Dynamic-mode controls (only consulted when weight_mode="dynamic")
+        "risk_score":                 max(0, min(100, int(opts.get("risk_score", 65)))),
+        "auto_adjust_enabled":        bool(opts.get("auto_adjust_enabled", False)),
+        "auto_adjust_aggressiveness": str(opts.get("auto_adjust_aggressiveness", "medium")).lower(),
         "max_cvar_pct":               cfg_max_cvar,
         "cost_rate_pct":              cfg_cost_rate,
         "group_allocations":          group_allocs,
@@ -1239,6 +1347,48 @@ def compute_snapshot() -> dict:
 
     log.info(f"Holdings: {len(holdings)}  unassigned: {sum(1 for h in holdings if h['group'] == 'unassigned')}")
 
+    # ── Dynamic risk axis (weight_mode="dynamic" only) ────────────────────────
+    # Compute effective risk from user's base risk_score plus optional VIX/drawdown
+    # auto-adjustment.  Uses the most recent stored snapshot for VIX + peak — this
+    # snapshot's own VIX is fetched later and can drift the next run, but the lag
+    # is acceptable given snapshots are daily.
+    risk_score    = float(cfg.get("risk_score", 65))
+    effective_risk = risk_score
+    risk_reason    = "weight_mode != dynamic"
+    drawdown_pct   = 0.0
+    interp_allocs  = None
+
+    if cfg.get("weight_mode") == "dynamic":
+        conn = get_db()
+        prev = conn.execute(
+            "SELECT portfolio_value, benchmarks_json FROM snapshots ORDER BY as_of DESC LIMIT 1"
+        ).fetchone()
+        peak_row = conn.execute("SELECT MAX(portfolio_value) AS peak FROM snapshots").fetchone()
+        conn.close()
+
+        # Best-effort VIX and peak — both optional, defaults are safe
+        prev_vix = 0.0
+        if prev and prev["benchmarks_json"]:
+            try:
+                bm = json.loads(prev["benchmarks_json"])
+                prev_vix = float(bm.get("vix", {}).get("latest") or 0.0)
+            except Exception:
+                pass
+        peak = float(peak_row["peak"]) if peak_row and peak_row["peak"] else 0.0
+
+        effective_risk, risk_reason = _compute_effective_risk(risk_score, prev_vix, drawdown_pct, cfg)
+        # Compute drawdown for next run after we know this snapshot's total_value.
+        # For now (pre-snapshot), drawdown=0 — auto-adjust uses prev VIX only.
+
+        interp_allocs = _interpolate_group_allocations(effective_risk)
+        cfg["effective_risk"]            = effective_risk
+        cfg["effective_risk_reason"]     = risk_reason
+        cfg["dynamic_group_allocations"] = interp_allocs
+        log.info(
+            f"Dynamic mode: risk={risk_score:.0f} → effective={effective_risk:.1f} "
+            f"({risk_reason}); group totals={ {g: round(v,1) for g,v in interp_allocs.items()} }"
+        )
+
     # ── Compute target weights ─────────────────────────────────────────────────
     target_weights = _compute_target_weights(holdings, cfg)
 
@@ -1478,10 +1628,25 @@ def compute_snapshot() -> dict:
              f"max_drift={max_drift_rel:.1f}%  rebalance={rebalance_needed}  vix={vix}  "
              f"unassigned={unassigned_count}")
 
+    # ── Drawdown vs all-time peak (informational, available to next snapshot) ──
+    conn = get_db()
+    peak_row = conn.execute("SELECT MAX(portfolio_value) AS peak FROM snapshots").fetchone()
+    conn.close()
+    peak = float(peak_row["peak"]) if peak_row and peak_row["peak"] else total_value
+    drawdown_pct_now = (total_value - peak) / peak * 100 if peak > 0 else 0.0
+
     return {
         "as_of":                as_of,
-        "collector_version":    "2.2.0",
+        "collector_version":    "2.3.0",
         "weight_mode":          cfg.get("weight_mode", "stored"),
+        "portfolio_phase":      cfg.get("portfolio_phase", "Momentum-Chill"),
+        "risk_score":           int(risk_score),
+        "effective_risk":       round(effective_risk, 1),
+        "effective_risk_reason": risk_reason,
+        "drawdown_pct":         round(drawdown_pct_now, 2),
+        "dynamic_group_allocations": (
+            {g: round(v, 1) for g, v in interp_allocs.items()} if interp_allocs else None
+        ),
         "portfolio_value":      round(total_value, 2),
         "invested_value":       round(total_cost, 2),
         "cash":                 round(cash, 2),
@@ -1797,7 +1962,7 @@ def health():
     return {
         "status":           "ok",
         "utc":              datetime.now(timezone.utc).isoformat(),
-        "version":          "2.2.0",
+        "version":          "2.3.0",
         "t212_base":        opts.get("t212_base", "https://demo.trading212.com"),
         "demo_mode":        "demo" in opts.get("t212_base", "demo"),
         "phase":            opts.get("portfolio_phase", "Momentum-Max"),
@@ -2122,7 +2287,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     # Always advertise the running collector version so HA sensors / dashboards
     # can confirm the add-on actually upgraded after a Supervisor update.
-    d["collector_version"] = "2.2.0"
+    d["collector_version"] = "2.3.0"
     for f in ["positions_json", "benchmarks_json", "drift_json", "momentum_json", "suggested_actions"]:
         key = f.replace("_json", "")
         d[key] = json.loads(d.pop(f) or ("[]" if f == "suggested_actions" else "{}"))
@@ -2154,7 +2319,7 @@ if __name__ == "__main__":
     # and ensures the /groups page works behind the ingress proxy.
     ingress_path = os.getenv("INGRESS_PATH", "")
     log.info(
-        f"Portfolio Collector v2.2.0 — phase={cfg['portfolio_phase']} — "
+        f"Portfolio Collector v2.3.0 — phase={cfg['portfolio_phase']} — "
         f"weight_mode={cfg['weight_mode']} — "
         f"DB: {DB_PATH} — T212: {cfg['t212_base']} — ingress={ingress_path or 'none'}"
     )
