@@ -32,6 +32,7 @@ rest:
         json_attributes:
           - as_of
           - collector_version
+          - weight_mode
           - portfolio_return_pct
           - invested_value
           - cash

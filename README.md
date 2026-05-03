@@ -348,28 +348,72 @@ options directly.
 
 ## Target-weight modes
 
-Two ways to compute each holding's `target_wt`. Toggle via `use_group_weights` in the add-on
-Configuration tab.
+Three ways to derive each holding's `target_wt`. Set via `weight_mode` in the add-on
+Configuration tab. Phase guard-rails (CVaR, cooldown, VIX, cost filter) are independent —
+they apply regardless of which weight mode you pick.
 
-### `use_group_weights: false` (default — "match my portfolio")
+### `weight_mode: stored` (default — "match my T212 portfolio")
 
 Targets come from each instrument's stored `initial_weight_pct`, which equals its actual
 T212 weight at the time of the most recent **Sync T212 Weights → Targets** click.
 
 - Day-one drift = 0
 - Rebalance only fires if the portfolio actually moves away from the baseline
-- Run **Sync T212 Weights → Targets** any time you want to redefine "where I am right now"
-  as the new baseline
+- Phase changes affect *guard-rails only* — your targets don't move
+- Run **Sync T212 Weights → Targets** any time you want to redefine "where I am right
+  now" as the new baseline
 
-### `use_group_weights: true` ("pull toward phase allocations")
+### `weight_mode: equal_in_group` ("pull toward equal-split phase allocations")
 
-Targets come from the phase preset's group allocations, split equally within each group.
+Targets = phase group allocation ÷ number of instruments in that group.
 
 - Momentum-Chill with 5 instruments in Momentum Core → each gets 30% / 5 = 6%
-- Active rebalancing toward the phase shape
-- Drift may be large on day one — the add-on will suggest trades to converge
+- Switch phases → group totals jump to the new phase's preset (35/40/15/5/5 for Max,
+  30/28/22/16/4 for Chill, etc.) and within-group is uniform
+- Day-one drift may be large; the add-on suggests trades to converge
 
-Switch modes any time. Run a snapshot afterwards to see the new targets.
+### `weight_mode: scaled_in_group` ("preserve my within-group ratios across phase changes")
+
+Targets = phase group allocation, weighted by stored within-group ratio.
+
+For each group: take the stored `initial_weight_pct` of each member, scale them so the
+group sum equals the phase preset's allocation for that group.
+
+**Worked example.** You hold VWRL.L=18%, SSAC.L=10% (both Global Beta). Stored sum = 28%.
+
+| Phase | Global Beta total | VWRL target | SSAC target |
+|---|:---:|:---:|:---:|
+| Momentum-Chill | 28% | 18% × 28/28 = **18** | 10% × 28/28 = **10** |
+| Momentum-Max | 40% | 18% × 40/28 = **26** | 10% × 40/28 = **14** |
+| Pre-Retirement | 33% | 18% × 33/28 = **21** | 10% × 33/28 = **12** |
+
+Switching back from Max → Chill restores the original 18/10 split. The within-group
+relationship you established (e.g. "I want roughly 1.8× VWRL per SSAC") stays consistent
+no matter which phase you toggle to. New scaling **only redistributes between groups** —
+within-group ratios are sticky.
+
+Falls back to equal-split for any group whose members have no stored history yet
+(e.g. a brand-new install before the first **Sync T212 Weights** click).
+
+### When to use which
+
+| Goal | Mode |
+|---|---|
+| Day-to-day monitoring; only react to real portfolio moves | `stored` |
+| Want each instrument in a group treated equally; happy to rebalance away from current shape | `equal_in_group` |
+| Want phase changes to redistribute *between* groups while keeping *within-group* preferences | `scaled_in_group` |
+
+Switch modes any time. Run a snapshot afterwards to see the new targets — config changes
+don't recompute on their own.
+
+### Legacy compatibility
+
+The pre-2.2 boolean flag `use_group_weights` is still respected for older configs:
+
+- `use_group_weights: true` (no `weight_mode` set) → behaves like `weight_mode: equal_in_group`
+- `use_group_weights: false` (no `weight_mode` set) → behaves like `weight_mode: stored`
+
+If `weight_mode` is set, `use_group_weights` is ignored.
 
 ---
 

@@ -5,7 +5,7 @@ description: >
   scores momentum, benchmarks against MSCI World / S&P 500 / FTSE 100 / DOW / VIX,
   and suggests rebalance trades for manual approval. No holdings list required —
   T212 is the source of truth.
-version: "2.1.0"
+version: "2.2.0"
 slug: portfolio_collector
 init: false
 url: "https://github.com/YOUR_GITHUB_USERNAME/ha-portfolio-collector"
@@ -44,9 +44,19 @@ options:
   # Set to any other string (e.g. "Custom") to use the individual settings below.
   portfolio_phase: "Momentum-Chill"
 
-  # Group-based weight derivation
-  # If true, individual target weights are derived from group allocations.
-  # Auto-enabled when a phase is selected via the dashboard.
+  # Target-weight derivation mode (independent of phase guard-rails):
+  #   "stored"          — targets = your T212 actual weights at sync time
+  #                       (drift relative to your real portfolio; zero-drift baseline)
+  #   "equal_in_group"  — targets = phase group allocation / instruments-in-group
+  #                       (uniform within each group)
+  #   "scaled_in_group" — targets = phase group allocation, weighted by stored
+  #                       within-group ratio (preserves VWRL:SSAC kind of relationships
+  #                       across phase changes)
+  weight_mode: "stored"
+
+  # Legacy boolean — kept for backwards compatibility with older configs.
+  # If weight_mode is set, this is ignored.  If weight_mode is empty, then
+  # use_group_weights=true behaves like weight_mode="equal_in_group".
   use_group_weights: false
 
   # CVaR (tail-risk) constraint — set to 0 to disable
@@ -73,7 +83,8 @@ schema:
   vix_extreme_threshold: int
   min_days_between_rebalance: int
   portfolio_phase: str
-  use_group_weights: bool
+  weight_mode: list(stored|equal_in_group|scaled_in_group)?
+  use_group_weights: bool?
   max_cvar_pct: float
   cost_rate_pct: float
   max_snapshot_change_pct: int

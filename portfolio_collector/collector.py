@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portfolio Collector — Home Assistant Add-on v2.1.0
+Portfolio Collector — Home Assistant Add-on v2.2.0
 ===================================================
 Monitors a Trading 212 portfolio, computing drift from target weights,
 scoring momentum, benchmarking against major indices, and suggesting
@@ -188,7 +188,7 @@ _T212_EXCHANGE_MAP: list[tuple[str, str]] = [
     ("_US_EQ",   ""),
 ]
 
-app = FastAPI(title="Portfolio Collector", version="2.1.0")
+app = FastAPI(title="Portfolio Collector", version="2.2.0")
 
 
 # ── Ticker utilities ──────────────────────────────────────────────────────────
@@ -580,6 +580,46 @@ def _group_based_weights(holdings: list, group_allocs: dict) -> dict[str, float]
     return weights
 
 
+def _scaled_within_group_weights(holdings: list, group_allocs: dict) -> dict[str, float]:
+    """Phase-driven group totals with within-group ratios preserved from stored
+    initial_weight_pct.
+
+    For each group:
+      sum_stored = Σ(initial_weight_pct of members)
+      member_target = stored × (group_alloc / sum_stored)
+
+    If sum_stored == 0 for a group (no T212 history yet), falls back to equal
+    split within that group so the member targets aren't all zero.
+
+    Effect: switching phases (e.g. Momentum-Chill 28% Global Beta → Momentum-Max
+    40% Global Beta) preserves the VWRL:SSAC ratio inside the group while
+    expanding/shrinking the group total to match the new phase preset.
+    """
+    counts: dict[str, int]   = {}
+    sums:   dict[str, float] = {}
+    for h in holdings:
+        g = h.get("group", "global_beta")
+        if g == "unassigned":
+            g = "global_beta"
+        counts[g] = counts.get(g, 0) + 1
+        sums[g]   = sums.get(g, 0)   + float(h.get("initial_weight_pct") or 0)
+
+    weights = {}
+    for h in holdings:
+        g = h.get("group", "global_beta")
+        if g == "unassigned":
+            g = "global_beta"
+        alloc      = group_allocs.get(g, 5.0)
+        stored     = float(h.get("initial_weight_pct") or 0)
+        group_sum  = sums.get(g, 0)
+        if group_sum > 0:
+            weights[h["yahoo_symbol"]] = stored * alloc / group_sum
+        else:
+            # No T212 history for this group yet — equal split as a safe default
+            weights[h["yahoo_symbol"]] = alloc / counts[g]
+    return weights
+
+
 def _round_weights_to_integers(raw: dict[str, float]) -> dict[str, int]:
     """Hamilton (largest-remainder) rounding so integer weights sum to 100."""
     floors     = {sym: int(w) for sym, w in raw.items()}
@@ -690,28 +730,40 @@ def _restore_last_good_targets(positions: list) -> bool:
 def _compute_target_weights(holdings: list, cfg: dict) -> dict[str, int]:
     """Derive rounded integer target weights from the live holdings list.
 
-    Priority order:
-      1. Group-based  — if use_group_weights=True and ≥1 holding is assigned
-      2. Stored T212  — initial_weight_pct captured at first snapshot (zero drift
-                        on fresh install; no rebalance until groups are assigned)
-      3. Equal weight — fallback when no stored weights exist yet
+    Three modes selected via cfg["weight_mode"]:
+
+      "stored"           — targets = stored initial_weight_pct, normalised to 100
+                           (drift relative to your T212 actuals at sync time)
+      "equal_in_group"   — phase group_alloc / instruments-in-group
+                           (uniform within each group)
+      "scaled_in_group"  — phase group_alloc, weighted by stored ratio within group
+                           (preserves VWRL:SSAC kind of relationships across phase
+                            changes — group total expands/shrinks but ratios stay)
+
+    Backwards-compatible with the legacy boolean `use_group_weights` flag, which
+    maps to "equal_in_group" when set.
     """
     n = len(holdings)
     if n == 0:
         return {}
-    if cfg.get("use_group_weights") and any(h["group"] != "unassigned" for h in holdings):
+
+    mode       = cfg.get("weight_mode", "stored")
+    has_groups = any(h["group"] != "unassigned" for h in holdings)
+
+    if mode == "scaled_in_group" and has_groups:
+        fractional = _scaled_within_group_weights(holdings, cfg["group_allocations"])
+    elif mode == "equal_in_group" and has_groups:
         fractional = _group_based_weights(holdings, cfg["group_allocations"])
     else:
-        # Use initial T212 weights stored at first snapshot
+        # "stored" mode (or no groups assigned yet) — use initial_weight_pct
         stored     = {h["yahoo_symbol"]: float(h.get("initial_weight_pct") or 0) for h in holdings}
         total      = sum(stored.values())
         zero_count = sum(1 for w in stored.values() if w <= 0)
         if total > 10.0 and zero_count == 0:
-            # All instruments have stored T212 weights — normalise and use them
             fractional = {sym: w / total * 100 for sym, w in stored.items()}
         else:
-            # Some/all initial weights missing (DB migration pending or very first
-            # collect) — fall back to equal weight so no instrument gets 0% target
+            # Some/all initial weights missing — fall back to equal weight so no
+            # instrument gets 0% target (validator would reject otherwise)
             fractional = {h["yahoo_symbol"]: 100.0 / n for h in holdings}
     return _round_weights_to_integers(fractional)
 
@@ -741,6 +793,22 @@ def load_config() -> dict:
         cfg_cooldown  = int(opts.get("min_days_between_rebalance", 21))
         cfg_vix_high  = float(opts.get("vix_high_threshold", 25))
 
+    # ── Target-weight mode — three options, with legacy fallback ───────────────
+    # Phase presets always control guard-rails (CVaR, VIX, cooldown, cost filter).
+    # weight_mode is an INDEPENDENT decision about target derivation:
+    #   "stored"          — initial_weight_pct (T212 actuals at sync time)
+    #   "equal_in_group"  — phase group_alloc / count (equal split within group)
+    #   "scaled_in_group" — phase group_alloc weighted by stored ratio within group
+    weight_mode_raw = str(opts.get("weight_mode", "")).strip().lower()
+    if weight_mode_raw in ("stored", "equal_in_group", "scaled_in_group"):
+        weight_mode = weight_mode_raw
+    elif weight_mode_raw:
+        log.warning(f"Unknown weight_mode '{weight_mode_raw}', defaulting to 'stored'")
+        weight_mode = "stored"
+    else:
+        # Legacy: derive from use_group_weights bool flag
+        weight_mode = "equal_in_group" if opts.get("use_group_weights") else "stored"
+
     return {
         "t212_token":                 opts.get("t212_token", os.getenv("T212_TOKEN", "")).strip(),
         "t212_base":                  opts.get("t212_base", os.getenv("T212_BASE", "https://demo.trading212.com")).strip(),
@@ -750,9 +818,10 @@ def load_config() -> dict:
         "vix_high_threshold":         cfg_vix_high,
         "vix_extreme_threshold":      float(opts.get("vix_extreme_threshold", 35)),
         "min_days_between_rebalance": cfg_cooldown,
-        # Phase presets control guard-rails only (CVaR, VIX, cooldown, cost filter).
-        # Group weight derivation is a separate decision — controlled independently.
-        "use_group_weights":          bool(opts.get("use_group_weights", False)),
+        "weight_mode":                weight_mode,
+        # Legacy compat — older code paths still read this; `True` whenever any
+        # group-aware mode is in use.
+        "use_group_weights":          weight_mode in ("equal_in_group", "scaled_in_group"),
         "max_cvar_pct":               cfg_max_cvar,
         "cost_rate_pct":              cfg_cost_rate,
         "group_allocations":          group_allocs,
@@ -1411,7 +1480,8 @@ def compute_snapshot() -> dict:
 
     return {
         "as_of":                as_of,
-        "collector_version":    "2.1.0",
+        "collector_version":    "2.2.0",
+        "weight_mode":          cfg.get("weight_mode", "stored"),
         "portfolio_value":      round(total_value, 2),
         "invested_value":       round(total_cost, 2),
         "cash":                 round(cash, 2),
@@ -1727,7 +1797,7 @@ def health():
     return {
         "status":           "ok",
         "utc":              datetime.now(timezone.utc).isoformat(),
-        "version":          "2.1.0",
+        "version":          "2.2.0",
         "t212_base":        opts.get("t212_base", "https://demo.trading212.com"),
         "demo_mode":        "demo" in opts.get("t212_base", "demo"),
         "phase":            opts.get("portfolio_phase", "Momentum-Max"),
@@ -2052,7 +2122,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     # Always advertise the running collector version so HA sensors / dashboards
     # can confirm the add-on actually upgraded after a Supervisor update.
-    d["collector_version"] = "2.1.0"
+    d["collector_version"] = "2.2.0"
     for f in ["positions_json", "benchmarks_json", "drift_json", "momentum_json", "suggested_actions"]:
         key = f.replace("_json", "")
         d[key] = json.loads(d.pop(f) or ("[]" if f == "suggested_actions" else "{}"))
@@ -2084,7 +2154,8 @@ if __name__ == "__main__":
     # and ensures the /groups page works behind the ingress proxy.
     ingress_path = os.getenv("INGRESS_PATH", "")
     log.info(
-        f"Portfolio Collector v2.1.0 — phase={cfg['portfolio_phase']} — "
+        f"Portfolio Collector v2.2.0 — phase={cfg['portfolio_phase']} — "
+        f"weight_mode={cfg['weight_mode']} — "
         f"DB: {DB_PATH} — T212: {cfg['t212_base']} — ingress={ingress_path or 'none'}"
     )
     uvicorn.run(app, host="0.0.0.0", port=PORT, root_path=ingress_path)

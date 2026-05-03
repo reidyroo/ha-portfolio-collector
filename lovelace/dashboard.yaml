@@ -14,6 +14,8 @@ views:
       - type: markdown
         content: |
           **Collector running:** v{{ state_attr('sensor.portfolio_value', 'collector_version') or 'unknown — run snapshot' }} ·
+          **Phase:** {{ states('input_select.portfolio_phase') }} ·
+          **Weight mode:** {{ state_attr('sensor.portfolio_value', 'weight_mode') or 'unknown' }} ·
           **Snapshot:** {{ state_attr('sensor.portfolio_value', 'as_of') or 'none yet' }}
 
       # ── Header: value / return / cash / VIX ──────────────────────────────

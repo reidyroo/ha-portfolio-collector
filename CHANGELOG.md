@@ -4,6 +4,33 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [2.2.0] — 2026-05-03
+
+### Added
+- **`weight_mode` configuration option** — three target-derivation strategies,
+  replacing the boolean `use_group_weights`:
+  - `stored` (default) — targets = stored T212 weights at sync time. Drift relative
+    to your real portfolio. Phase changes don't move targets. Same as the old
+    `use_group_weights: false`.
+  - `equal_in_group` — targets = phase group allocation / instruments-in-group.
+    Equal split within each group. Same as the old `use_group_weights: true`.
+  - `scaled_in_group` — **NEW**. Phase-driven group totals, with within-group
+    ratios preserved from stored weights. Switching from Momentum-Chill to
+    Momentum-Max scales VWRL.L 18→26 and SSAC.L 10→14 (preserving 1.8:1 ratio
+    while expanding Global Beta from 28% → 40%). Reversibly restores the
+    original split when switching back.
+- `weight_mode` exposed as a `sensor.portfolio_value` attribute and shown in
+  the dashboard banner (Overview view top markdown card).
+- Add-on startup banner logs the active weight mode.
+
+### Backwards compatibility
+- `use_group_weights` still respected for older configs:
+  - `use_group_weights: true` + no `weight_mode` → maps to `equal_in_group`
+  - `use_group_weights: false` + no `weight_mode` → maps to `stored`
+- Existing configs work unchanged.
+
+---
+
 ## [2.1.0] — 2026-05-02
 
 ### Promoted
