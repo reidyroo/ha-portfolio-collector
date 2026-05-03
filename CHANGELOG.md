@@ -4,6 +4,18 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [2.3.1] — 2026-05-03
+
+### Fixed
+- **Dynamic-mode fields persist across snapshots.** v2.3.0 returned the new
+  fields (`weight_mode`, `risk_score`, `effective_risk`, `effective_risk_reason`,
+  `drawdown_pct`, `dynamic_group_allocations`, `portfolio_phase`) only from the
+  in-memory `/api/collect` response, not from the DB-reconstructed
+  `/api/latest-snapshot`. Now stored in a new `metadata_json` column and
+  expanded in `_row_to_dict`. Migration auto-adds the column on existing DBs.
+
+---
+
 ## [2.3.0] — 2026-05-03
 
 ### Added — dynamic risk axis (foundation)

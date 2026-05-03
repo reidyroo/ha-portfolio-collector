@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portfolio Collector — Home Assistant Add-on v2.3.0
+Portfolio Collector — Home Assistant Add-on v2.3.1
 ===================================================
 Monitors a Trading 212 portfolio, computing drift from target weights,
 scoring momentum, benchmarking against major indices, and suggesting
@@ -199,7 +199,7 @@ _T212_EXCHANGE_MAP: list[tuple[str, str]] = [
     ("_US_EQ",   ""),
 ]
 
-app = FastAPI(title="Portfolio Collector", version="2.3.0")
+app = FastAPI(title="Portfolio Collector", version="2.3.1")
 
 
 # ── Ticker utilities ──────────────────────────────────────────────────────────
@@ -352,7 +352,11 @@ def init_db():
             approved             INTEGER DEFAULT 0,
             approved_at          TEXT,
             executed             INTEGER DEFAULT 0,
-            executed_at          TEXT
+            executed_at          TEXT,
+            -- Generic JSON metadata bag for fields added in v2.3.1+:
+            -- weight_mode, portfolio_phase, risk_score, effective_risk,
+            -- effective_risk_reason, drawdown_pct, dynamic_group_allocations
+            metadata_json        TEXT
         );
 
         CREATE TABLE IF NOT EXISTS instrument_catalog (
@@ -391,6 +395,14 @@ def init_db():
         log.info("DB migration: added initial_weight_pct column to instrument_groups")
     except Exception:
         pass  # Column already exists — normal on fresh install or after first migration
+
+    # Migration: add metadata_json to existing DBs that predate 2.3.1
+    try:
+        conn.execute("ALTER TABLE snapshots ADD COLUMN metadata_json TEXT")
+        conn.commit()
+        log.info("DB migration: added metadata_json column to snapshots")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
     log.info(f"Database ready: {DB_PATH}")
@@ -1601,12 +1613,30 @@ def compute_snapshot() -> dict:
     # ── Persist ────────────────────────────────────────────────────────────────
     as_of = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     conn  = get_db()
+    # Drawdown vs all-time peak (this snapshot included)
+    pk = conn.execute("SELECT MAX(portfolio_value) AS peak FROM snapshots").fetchone()
+    pk_val = float(pk["peak"]) if pk and pk["peak"] else total_value
+    drawdown_now = round((total_value - pk_val) / pk_val * 100 if pk_val > 0 else 0.0, 2)
+
+    metadata = {
+        "weight_mode":           cfg.get("weight_mode", "stored"),
+        "portfolio_phase":       cfg.get("portfolio_phase", "Momentum-Chill"),
+        "risk_score":            int(risk_score),
+        "effective_risk":        round(effective_risk, 1),
+        "effective_risk_reason": risk_reason,
+        "drawdown_pct":          drawdown_now,
+        "dynamic_group_allocations": (
+            {g: round(v, 1) for g, v in interp_allocs.items()} if interp_allocs else None
+        ),
+    }
+
     conn.execute("""
         INSERT OR REPLACE INTO snapshots
           (as_of, portfolio_value, invested_value, cash, portfolio_return_pct,
            positions_json, benchmarks_json, drift_json, momentum_json,
-           rebalance_needed, rebalance_reason, suggested_actions, approved, executed)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,0)
+           rebalance_needed, rebalance_reason, suggested_actions, approved, executed,
+           metadata_json)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,0,?)
     """, (
         as_of,
         round(total_value, 2),
@@ -1620,6 +1650,7 @@ def compute_snapshot() -> dict:
         1 if rebalance_needed else 0,
         rebalance_reason,
         json.dumps(suggested_actions),
+        json.dumps(metadata),
     ))
     conn.commit()
     conn.close()
@@ -1628,22 +1659,15 @@ def compute_snapshot() -> dict:
              f"max_drift={max_drift_rel:.1f}%  rebalance={rebalance_needed}  vix={vix}  "
              f"unassigned={unassigned_count}")
 
-    # ── Drawdown vs all-time peak (informational, available to next snapshot) ──
-    conn = get_db()
-    peak_row = conn.execute("SELECT MAX(portfolio_value) AS peak FROM snapshots").fetchone()
-    conn.close()
-    peak = float(peak_row["peak"]) if peak_row and peak_row["peak"] else total_value
-    drawdown_pct_now = (total_value - peak) / peak * 100 if peak > 0 else 0.0
-
     return {
         "as_of":                as_of,
-        "collector_version":    "2.3.0",
+        "collector_version":    "2.3.1",
         "weight_mode":          cfg.get("weight_mode", "stored"),
         "portfolio_phase":      cfg.get("portfolio_phase", "Momentum-Chill"),
         "risk_score":           int(risk_score),
         "effective_risk":       round(effective_risk, 1),
         "effective_risk_reason": risk_reason,
-        "drawdown_pct":         round(drawdown_pct_now, 2),
+        "drawdown_pct":         drawdown_now,
         "dynamic_group_allocations": (
             {g: round(v, 1) for g, v in interp_allocs.items()} if interp_allocs else None
         ),
@@ -1962,7 +1986,7 @@ def health():
     return {
         "status":           "ok",
         "utc":              datetime.now(timezone.utc).isoformat(),
-        "version":          "2.3.0",
+        "version":          "2.3.1",
         "t212_base":        opts.get("t212_base", "https://demo.trading212.com"),
         "demo_mode":        "demo" in opts.get("t212_base", "demo"),
         "phase":            opts.get("portfolio_phase", "Momentum-Max"),
@@ -2287,10 +2311,20 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     # Always advertise the running collector version so HA sensors / dashboards
     # can confirm the add-on actually upgraded after a Supervisor update.
-    d["collector_version"] = "2.3.0"
+    d["collector_version"] = "2.3.1"
     for f in ["positions_json", "benchmarks_json", "drift_json", "momentum_json", "suggested_actions"]:
         key = f.replace("_json", "")
         d[key] = json.loads(d.pop(f) or ("[]" if f == "suggested_actions" else "{}"))
+    # Expand v2.3+ metadata bag (weight_mode, risk_score, effective_risk, etc.)
+    # into top-level keys so HA sensors and the dashboard can read them.
+    meta_raw = d.pop("metadata_json", None)
+    if meta_raw:
+        try:
+            meta = json.loads(meta_raw)
+            for k, v in meta.items():
+                d.setdefault(k, v)
+        except Exception:
+            pass
     if "positions" in d and isinstance(d["positions"], list):
         gs: dict = {}
         for p in d["positions"]:
@@ -2319,7 +2353,7 @@ if __name__ == "__main__":
     # and ensures the /groups page works behind the ingress proxy.
     ingress_path = os.getenv("INGRESS_PATH", "")
     log.info(
-        f"Portfolio Collector v2.3.0 — phase={cfg['portfolio_phase']} — "
+        f"Portfolio Collector v2.3.1 — phase={cfg['portfolio_phase']} — "
         f"weight_mode={cfg['weight_mode']} — "
         f"DB: {DB_PATH} — T212: {cfg['t212_base']} — ingress={ingress_path or 'none'}"
     )
