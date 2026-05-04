@@ -4,6 +4,19 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [2.4.1] — 2026-05-04
+
+### Added
+- **Bulk snapshot delete filters** — `DELETE /api/snapshots` now accepts any
+  combination of `date`, `before`, `after`, `min_value`, `max_value`. Useful
+  for cleaning up rogue spikes from early data without picking dates one by one.
+  Example: `DELETE /api/snapshots?max_value=50000` removes any snapshot whose
+  stored portfolio value exceeded £50k (a known data error pattern from
+  pre-sanity-check eras). Response includes the list of rows removed.
+- Backwards-compatible — old `?date=YYYY-MM-DD` calls work unchanged.
+
+---
+
 ## [2.4.0] — 2026-05-04
 
 ### Added — cooldown override + live risk tuning + bidirectional auto-adjust

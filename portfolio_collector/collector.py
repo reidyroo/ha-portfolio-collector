@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portfolio Collector — Home Assistant Add-on v2.4.0
+Portfolio Collector — Home Assistant Add-on v2.4.1
 ===================================================
 Monitors a Trading 212 portfolio, computing drift from target weights,
 scoring momentum, benchmarking against major indices, and suggesting
@@ -199,7 +199,7 @@ _T212_EXCHANGE_MAP: list[tuple[str, str]] = [
     ("_US_EQ",   ""),
 ]
 
-app = FastAPI(title="Portfolio Collector", version="2.4.0")
+app = FastAPI(title="Portfolio Collector", version="2.4.1")
 
 
 # ── Ticker utilities ──────────────────────────────────────────────────────────
@@ -353,7 +353,7 @@ def init_db():
             approved_at          TEXT,
             executed             INTEGER DEFAULT 0,
             executed_at          TEXT,
-            -- Generic JSON metadata bag for fields added in v2.4.0+:
+            -- Generic JSON metadata bag for fields added in v2.4.1+:
             -- weight_mode, portfolio_phase, risk_score, effective_risk,
             -- effective_risk_reason, drawdown_pct, dynamic_group_allocations
             metadata_json        TEXT
@@ -404,7 +404,7 @@ def init_db():
     except Exception:
         pass  # Column already exists — normal on fresh install or after first migration
 
-    # Migration: add metadata_json to existing DBs that predate 2.4.0
+    # Migration: add metadata_json to existing DBs that predate 2.4.1
     try:
         conn.execute("ALTER TABLE snapshots ADD COLUMN metadata_json TEXT")
         conn.commit()
@@ -1727,7 +1727,7 @@ def compute_snapshot() -> dict:
 
     return {
         "as_of":                as_of,
-        "collector_version":    "2.4.0",
+        "collector_version":    "2.4.1",
         "weight_mode":          cfg.get("weight_mode", "stored"),
         "portfolio_phase":      cfg.get("portfolio_phase", "Momentum-Chill"),
         "risk_score":           int(risk_score),
@@ -2090,7 +2090,7 @@ def health():
     return {
         "status":           "ok",
         "utc":              datetime.now(timezone.utc).isoformat(),
-        "version":          "2.4.0",
+        "version":          "2.4.1",
         "t212_base":        opts.get("t212_base", "https://demo.trading212.com"),
         "demo_mode":        "demo" in opts.get("t212_base", "demo"),
         "phase":            opts.get("portfolio_phase", "Momentum-Max"),
@@ -2126,15 +2126,72 @@ def list_snapshots(limit: int = 90, summary: bool = False):
 
 
 @app.delete("/api/snapshots")
-def delete_snapshots(date: str):
-    """Delete all snapshots for a given date. Example: DELETE /api/snapshots?date=2026-04-28"""
-    conn    = get_db()
-    result  = conn.execute("DELETE FROM snapshots WHERE as_of LIKE ?", (f"{date}%",))
+def delete_snapshots(
+    date: Optional[str]   = None,
+    before: Optional[str] = None,
+    after:  Optional[str] = None,
+    min_value: Optional[float] = None,
+    max_value: Optional[float] = None,
+):
+    """Delete snapshots matching one or more filter criteria.
+
+    Query params (any combination):
+      date=YYYY-MM-DD     — exact date (matches as_of LIKE 'YYYY-MM-DD%')
+      before=YYYY-MM-DD   — all snapshots strictly before this date
+      after=YYYY-MM-DD    — all snapshots strictly after this date
+      min_value=N         — delete rows where portfolio_value < N (rogue lows)
+      max_value=N         — delete rows where portfolio_value > N (rogue spikes)
+
+    Examples:
+      DELETE /api/snapshots?date=2026-04-28
+      DELETE /api/snapshots?before=2026-05-01
+      DELETE /api/snapshots?max_value=50000   ← clean rogue spikes only
+      DELETE /api/snapshots?after=2026-04-15&max_value=20000
+
+    At least one filter must be supplied (refuses to delete everything).
+    """
+    clauses: list = []
+    params:  list = []
+    if date is not None:
+        clauses.append("as_of LIKE ?")
+        params.append(f"{date}%")
+    if before is not None:
+        clauses.append("as_of < ?")
+        params.append(before)
+    if after is not None:
+        clauses.append("as_of > ?")
+        params.append(after + "T99")  # past end-of-day
+    if min_value is not None:
+        clauses.append("portfolio_value < ?")
+        params.append(float(min_value))
+    if max_value is not None:
+        clauses.append("portfolio_value > ?")
+        params.append(float(max_value))
+
+    if not clauses:
+        raise HTTPException(400, "At least one filter required: date | before | after | min_value | max_value")
+
+    where = " AND ".join(clauses)
+    conn  = get_db()
+    # Preview first so the response shows what was removed
+    preview = conn.execute(
+        f"SELECT as_of, portfolio_value FROM snapshots WHERE {where} ORDER BY as_of",
+        params,
+    ).fetchall()
+    result = conn.execute(f"DELETE FROM snapshots WHERE {where}", params)
     deleted = result.rowcount
     conn.commit()
     conn.close()
-    log.info(f"Deleted {deleted} snapshot(s) for date {date}")
-    return {"deleted": deleted, "date": date}
+    log.info(
+        f"Deleted {deleted} snapshot(s) — filters: "
+        f"date={date} before={before} after={after} min_value={min_value} max_value={max_value}"
+    )
+    return {
+        "deleted":      deleted,
+        "filters":      {"date": date, "before": before, "after": after,
+                         "min_value": min_value, "max_value": max_value},
+        "removed_rows": [{"as_of": r["as_of"], "portfolio_value": r["portfolio_value"]} for r in preview],
+    }
 
 
 @app.post("/api/collect")
@@ -2499,7 +2556,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     # Always advertise the running collector version so HA sensors / dashboards
     # can confirm the add-on actually upgraded after a Supervisor update.
-    d["collector_version"] = "2.4.0"
+    d["collector_version"] = "2.4.1"
     for f in ["positions_json", "benchmarks_json", "drift_json", "momentum_json", "suggested_actions"]:
         key = f.replace("_json", "")
         d[key] = json.loads(d.pop(f) or ("[]" if f == "suggested_actions" else "{}"))
@@ -2541,7 +2598,7 @@ if __name__ == "__main__":
     # and ensures the /groups page works behind the ingress proxy.
     ingress_path = os.getenv("INGRESS_PATH", "")
     log.info(
-        f"Portfolio Collector v2.4.0 — phase={cfg['portfolio_phase']} — "
+        f"Portfolio Collector v2.4.1 — phase={cfg['portfolio_phase']} — "
         f"weight_mode={cfg['weight_mode']} — "
         f"DB: {DB_PATH} — T212: {cfg['t212_base']} — ingress={ingress_path or 'none'}"
     )
