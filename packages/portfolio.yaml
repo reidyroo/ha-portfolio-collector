@@ -39,6 +39,8 @@ rest:
           - effective_risk_reason
           - drawdown_pct
           - dynamic_group_allocations
+          - cooldown_override_used
+          - cooldown_override_reason
           - portfolio_return_pct
           - invested_value
           - cash
@@ -168,6 +170,14 @@ input_number:
     unit_of_measurement: "%"
     icon: mdi:percent-outline
 
+  portfolio_risk_score:
+    name: "Risk Score (dynamic mode)"
+    min: 0
+    max: 100
+    step: 5
+    initial: 65
+    icon: mdi:speedometer
+
 
 # ── Template sensors ─────────────────────────────────────────────────────────
 template:
@@ -255,6 +265,25 @@ rest_command:
     content_type: "application/json"
     timeout: 60
 
+  set_risk_score:
+    url: "http://localhost:8000/api/set-risk-score"
+    method: POST
+    content_type: "application/json"
+    payload: '{"risk_score": {{ states(''input_number.portfolio_risk_score'') | int }}}'
+    timeout: 10
+
+  notch_up_cooldown:
+    url: "http://localhost:8000/api/notch-up"
+    method: POST
+    content_type: "application/json"
+    timeout: 10
+
+  cancel_notch_up:
+    url: "http://localhost:8000/api/cancel-notch-up"
+    method: POST
+    content_type: "application/json"
+    timeout: 10
+
   set_portfolio_phase:
     url: "http://localhost:8000/api/set-phase"
     method: POST
@@ -335,6 +364,38 @@ automation:
           message: >
             Market regime: {{ states('sensor.vix_regime') }}.
             Momentum-based rebalancing is paused until VIX returns below 25.
+
+  - id: portfolio_risk_score_change
+    alias: "Portfolio: Apply risk score when slider moves"
+    trigger:
+      - platform: state
+        entity_id: input_number.portfolio_risk_score
+    condition:
+      - condition: template
+        value_template: >
+          {{ trigger.to_state.state != trigger.from_state.state }}
+    action:
+      - service: rest_command.set_risk_score
+      - service: notify.persistent_notification
+        data:
+          title: "Risk Score → {{ states('input_number.portfolio_risk_score') | int }}"
+          message: >
+            Effective on next snapshot. Run *Run Snapshot Now* to apply
+            immediately, or wait for the daily 20:00 collect.
+
+  - id: portfolio_cooldown_override_fired
+    alias: "Portfolio: Notify when cooldown override fires"
+    trigger:
+      - platform: template
+        value_template: >
+          {{ state_attr('sensor.portfolio_value', 'cooldown_override_used') == true }}
+    action:
+      - service: notify.persistent_notification
+        data:
+          title: "Cooldown override fired"
+          message: >
+            {{ state_attr('sensor.portfolio_value', 'cooldown_override_reason') }}.
+            Review the trade plan on the Rebalance dashboard tab.
 
   - id: portfolio_phase_change
     alias: "Portfolio: Apply phase settings when phase selector changes"

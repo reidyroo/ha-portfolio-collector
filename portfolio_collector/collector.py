@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portfolio Collector — Home Assistant Add-on v2.3.1
+Portfolio Collector — Home Assistant Add-on v2.4.0
 ===================================================
 Monitors a Trading 212 portfolio, computing drift from target weights,
 scoring momentum, benchmarking against major indices, and suggesting
@@ -199,7 +199,7 @@ _T212_EXCHANGE_MAP: list[tuple[str, str]] = [
     ("_US_EQ",   ""),
 ]
 
-app = FastAPI(title="Portfolio Collector", version="2.3.1")
+app = FastAPI(title="Portfolio Collector", version="2.4.0")
 
 
 # ── Ticker utilities ──────────────────────────────────────────────────────────
@@ -353,7 +353,7 @@ def init_db():
             approved_at          TEXT,
             executed             INTEGER DEFAULT 0,
             executed_at          TEXT,
-            -- Generic JSON metadata bag for fields added in v2.3.1+:
+            -- Generic JSON metadata bag for fields added in v2.4.0+:
             -- weight_mode, portfolio_phase, risk_score, effective_risk,
             -- effective_risk_reason, drawdown_pct, dynamic_group_allocations
             metadata_json        TEXT
@@ -387,6 +387,14 @@ def init_db():
             target_wt    INTEGER NOT NULL,
             saved_at     TEXT NOT NULL
         );
+
+        -- Generic key/value store for transient runtime flags
+        -- (e.g. one-shot manual cooldown override "notch_up_pending").
+        CREATE TABLE IF NOT EXISTS runtime_state (
+            key        TEXT PRIMARY KEY,
+            value      TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
     """)
     # Migration: add initial_weight_pct to existing DBs that predate 2.0.3
     try:
@@ -396,7 +404,7 @@ def init_db():
     except Exception:
         pass  # Column already exists — normal on fresh install or after first migration
 
-    # Migration: add metadata_json to existing DBs that predate 2.3.1
+    # Migration: add metadata_json to existing DBs that predate 2.4.0
     try:
         conn.execute("ALTER TABLE snapshots ADD COLUMN metadata_json TEXT")
         conn.commit()
@@ -638,6 +646,7 @@ def _compute_effective_risk(
     base_risk: float,
     vix: float,
     drawdown_pct: float,
+    rally_pct_21d: float,
     cfg: dict,
 ) -> tuple[float, str]:
     """Optionally shift the user's risk_score based on live market signals.
@@ -645,10 +654,15 @@ def _compute_effective_risk(
     When `auto_adjust_enabled` is False, returns the user's risk_score unchanged.
     When enabled, applies bounded shifts:
 
-      • VIX above the configured "high" threshold pulls risk DOWN proportionally.
-      • Drawdown beyond -10% pulls risk DOWN proportionally.
+      DEFENSIVE shifts (always active when auto-adjust is on):
+        • VIX above the configured "high" threshold pulls risk DOWN proportionally.
+        • Drawdown beyond -10% pulls risk DOWN proportionally.
 
-    Maximum total shift is bounded by `auto_adjust_aggressiveness`:
+      AGGRESSIVE shifts (only when `auto_adjust_direction == "bidirectional"`):
+        • Strong 21-day portfolio rally above +5% pushes risk UP proportionally
+          (capped at +5pts max so it can't overwhelm the user's set risk_score).
+
+    Total shift bounded by `auto_adjust_aggressiveness`:
       low=5pts, medium=10pts, high=20pts.
 
     Returns (effective_risk, human-readable reason).
@@ -656,26 +670,34 @@ def _compute_effective_risk(
     if not cfg.get("auto_adjust_enabled", False):
         return base_risk, "auto-adjust off"
 
-    aggr = str(cfg.get("auto_adjust_aggressiveness", "medium")).lower()
+    aggr      = str(cfg.get("auto_adjust_aggressiveness", "medium")).lower()
+    direction = str(cfg.get("auto_adjust_direction", "defensive_only")).lower()
     max_shift = {"low": 5.0, "medium": 10.0, "high": 20.0}.get(aggr, 10.0)
 
-    shift   = 0.0
-    parts   = []
-    vix_hi  = float(cfg.get("vix_high_threshold", 25))
+    shift  = 0.0
+    parts  = []
+    vix_hi = float(cfg.get("vix_high_threshold", 25))
 
-    # VIX shift: high VIX → reduce risk (push toward defensive end of curve)
+    # ── DEFENSIVE: VIX above high threshold pulls risk DOWN ────────────────────
     if vix > vix_hi:
-        excess    = min(vix - vix_hi, 15.0)             # cap influence at +15 over threshold
-        vix_shift = -(excess / 15.0) * max_shift        # up to -max_shift at extreme
+        excess    = min(vix - vix_hi, 15.0)
+        vix_shift = -(excess / 15.0) * max_shift
         shift    += vix_shift
         parts.append(f"VIX={vix:.1f}({vix_shift:+.1f})")
 
-    # Drawdown shift: -10% to -30% → progressively reduce risk (max half of max_shift)
+    # ── DEFENSIVE: drawdown beyond -10% pulls risk DOWN ────────────────────────
     if drawdown_pct < -10.0:
-        excess  = min(abs(drawdown_pct) - 10.0, 20.0)
+        excess   = min(abs(drawdown_pct) - 10.0, 20.0)
         dd_shift = -(excess / 20.0) * (max_shift / 2.0)
-        shift  += dd_shift
+        shift   += dd_shift
         parts.append(f"DD={drawdown_pct:.1f}%({dd_shift:+.1f})")
+
+    # ── AGGRESSIVE: 21-day rally pushes risk UP (only if bidirectional) ────────
+    if direction == "bidirectional" and rally_pct_21d > 5.0:
+        excess      = min(rally_pct_21d - 5.0, 10.0)
+        rally_shift = (excess / 10.0) * min(5.0, max_shift)   # cap upside at +5pts
+        shift      += rally_shift
+        parts.append(f"Rally21d={rally_pct_21d:+.1f}%({rally_shift:+.1f})")
 
     effective = max(0.0, min(100.0, float(base_risk) + shift))
     reason    = "; ".join(parts) if parts else "no signals → no shift"
@@ -779,6 +801,25 @@ def _validate_targets(positions: list) -> tuple[bool, str]:
             )
 
     return True, "ok"
+
+
+def _get_runtime_flag(conn: sqlite3.Connection, key: str) -> Optional[str]:
+    row = conn.execute("SELECT value FROM runtime_state WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def _set_runtime_flag(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        """INSERT INTO runtime_state (key, value, updated_at) VALUES (?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at""",
+        (key, value, datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+
+
+def _clear_runtime_flag(conn: sqlite3.Connection, key: str) -> None:
+    conn.execute("DELETE FROM runtime_state WHERE key=?", (key,))
+    conn.commit()
 
 
 def _save_last_good_targets(positions: list) -> None:
@@ -942,6 +983,12 @@ def load_config() -> dict:
         "risk_score":                 max(0, min(100, int(opts.get("risk_score", 65)))),
         "auto_adjust_enabled":        bool(opts.get("auto_adjust_enabled", False)),
         "auto_adjust_aggressiveness": str(opts.get("auto_adjust_aggressiveness", "medium")).lower(),
+        "auto_adjust_direction":      str(opts.get("auto_adjust_direction", "defensive_only")).lower(),
+        # Cooldown override (auto + manual)
+        "cooldown_override_enabled":            bool(opts.get("cooldown_override_enabled", False)),
+        "cooldown_override_vix_threshold":      float(opts.get("cooldown_override_vix_threshold",
+                                                              float(cfg_vix_high) + 5)),
+        "cooldown_override_drawdown_threshold": float(opts.get("cooldown_override_drawdown_threshold", -15.0)),
         "max_cvar_pct":               cfg_max_cvar,
         "cost_rate_pct":              cfg_cost_rate,
         "group_allocations":          group_allocs,
@@ -1376,9 +1423,14 @@ def compute_snapshot() -> dict:
             "SELECT portfolio_value, benchmarks_json FROM snapshots ORDER BY as_of DESC LIMIT 1"
         ).fetchone()
         peak_row = conn.execute("SELECT MAX(portfolio_value) AS peak FROM snapshots").fetchone()
+        # 21-day-ago value for rally signal (bidirectional auto-adjust)
+        rally_row = conn.execute(
+            "SELECT portfolio_value FROM snapshots WHERE as_of <= datetime('now', '-21 days') "
+            "ORDER BY as_of DESC LIMIT 1"
+        ).fetchone()
         conn.close()
 
-        # Best-effort VIX and peak — both optional, defaults are safe
+        # Best-effort VIX, peak, drawdown (lagged one snapshot), and 21d rally
         prev_vix = 0.0
         if prev and prev["benchmarks_json"]:
             try:
@@ -1387,11 +1439,16 @@ def compute_snapshot() -> dict:
             except Exception:
                 pass
         peak = float(peak_row["peak"]) if peak_row and peak_row["peak"] else 0.0
+        prev_value   = float(prev["portfolio_value"]) if prev and prev["portfolio_value"] else 0.0
+        drawdown_lag = (prev_value - peak) / peak * 100 if peak > 0 and prev_value > 0 else 0.0
+        rally_21d    = (
+            (prev_value - float(rally_row["portfolio_value"])) / float(rally_row["portfolio_value"]) * 100
+            if rally_row and rally_row["portfolio_value"] and prev_value > 0 else 0.0
+        )
 
-        effective_risk, risk_reason = _compute_effective_risk(risk_score, prev_vix, drawdown_pct, cfg)
-        # Compute drawdown for next run after we know this snapshot's total_value.
-        # For now (pre-snapshot), drawdown=0 — auto-adjust uses prev VIX only.
-
+        effective_risk, risk_reason = _compute_effective_risk(
+            risk_score, prev_vix, drawdown_lag, rally_21d, cfg
+        )
         interp_allocs = _interpolate_group_allocations(effective_risk)
         cfg["effective_risk"]            = effective_risk
         cfg["effective_risk_reason"]     = risk_reason
@@ -1589,6 +1646,13 @@ def compute_snapshot() -> dict:
         m12   =  m.get("momentum_12m") or 0.0
         mom_scores[sym] = round(trend * 0.5 + m6 * 0.3 + m12 * 0.2, 2)
 
+    # Live drawdown vs all-time peak (used by cooldown auto-override below)
+    conn_dd = get_db()
+    pk_dd = conn_dd.execute("SELECT MAX(portfolio_value) AS peak FROM snapshots").fetchone()
+    conn_dd.close()
+    pk_dd_val = float(pk_dd["peak"]) if pk_dd and pk_dd["peak"] else total_value
+    cfg["drawdown_pct"] = round((total_value - pk_dd_val) / pk_dd_val * 100 if pk_dd_val > 0 else 0.0, 2)
+
     rebalance_needed, rebalance_reason, suggested_actions = _compute_rebalance(
         cfg, positions, mom_scores, momentum, vix, total_value, max_drift_rel, hist
     )
@@ -1625,6 +1689,8 @@ def compute_snapshot() -> dict:
         "effective_risk":        round(effective_risk, 1),
         "effective_risk_reason": risk_reason,
         "drawdown_pct":          drawdown_now,
+        "cooldown_override_used":   bool(cfg.get("_cooldown_override_used", False)),
+        "cooldown_override_reason": cfg.get("_cooldown_override_reason", ""),
         "dynamic_group_allocations": (
             {g: round(v, 1) for g, v in interp_allocs.items()} if interp_allocs else None
         ),
@@ -1661,7 +1727,7 @@ def compute_snapshot() -> dict:
 
     return {
         "as_of":                as_of,
-        "collector_version":    "2.3.1",
+        "collector_version":    "2.4.0",
         "weight_mode":          cfg.get("weight_mode", "stored"),
         "portfolio_phase":      cfg.get("portfolio_phase", "Momentum-Chill"),
         "risk_score":           int(risk_score),
@@ -1693,19 +1759,57 @@ def _compute_rebalance(cfg, positions, mom_scores, momentum, vix, total_value, m
     vix_extreme   = cfg["vix_extreme_threshold"]
     cooldown_days = cfg["min_days_between_rebalance"]
 
+    # ── Cooldown gate — with override paths ────────────────────────────────────
+    # Cooldown can be bypassed by:
+    #   a) Manual notch-up flag (one-shot, always honoured)
+    #   b) Auto override on extreme conditions when cooldown_override_enabled:
+    #        VIX > cooldown_override_vix_threshold, OR
+    #        drawdown < cooldown_override_drawdown_threshold
     conn = get_db()
     row  = conn.execute(
         "SELECT approved_at FROM snapshots WHERE executed=1 ORDER BY executed_at DESC LIMIT 1"
     ).fetchone()
-    conn.close()
+    days_since = None
+    cooldown_blocked = False
     if row and row["approved_at"]:
         try:
-            days = (datetime.now(timezone.utc)
+            days_since = (datetime.now(timezone.utc)
                     - datetime.fromisoformat(row["approved_at"].replace("Z", "+00:00"))).days
-            if days < cooldown_days:
-                return False, f"Cooldown: {days}d since last rebalance (min {cooldown_days}d)", []
+            if days_since < cooldown_days:
+                cooldown_blocked = True
         except Exception:
             pass
+
+    override_used   = False
+    override_reason = ""
+    if cooldown_blocked:
+        # 1. Manual notch-up always wins
+        if _get_runtime_flag(conn, "notch_up_pending") == "1":
+            override_used   = True
+            override_reason = "manual notch-up"
+            _clear_runtime_flag(conn, "notch_up_pending")
+            log.warning(f"COOLDOWN OVERRIDE: {override_reason} — bypassing {days_since}d cooldown")
+        # 2. Auto override on extreme conditions (defensive bias)
+        elif cfg.get("cooldown_override_enabled", False):
+            vix_thresh = float(cfg.get("cooldown_override_vix_threshold", vix_high + 5))
+            dd_thresh  = float(cfg.get("cooldown_override_drawdown_threshold", -15.0))
+            drawdown   = float(cfg.get("drawdown_pct", 0.0))
+            if vix > vix_thresh:
+                override_used   = True
+                override_reason = f"VIX={vix:.1f} > {vix_thresh:.0f} auto-override"
+            elif drawdown < dd_thresh:
+                override_used   = True
+                override_reason = f"drawdown={drawdown:.1f}% < {dd_thresh:.0f}% auto-override"
+            if override_used:
+                log.warning(f"COOLDOWN OVERRIDE: {override_reason} — bypassing {days_since}d cooldown")
+
+        if not override_used:
+            conn.close()
+            return False, f"Cooldown: {days_since}d since last rebalance (min {cooldown_days}d)", []
+
+    conn.close()
+    cfg["_cooldown_override_used"]   = override_used
+    cfg["_cooldown_override_reason"] = override_reason
 
     if vix > vix_extreme:
         return False, f"VIX={vix:.1f} — extreme volatility, rebalancing frozen", []
@@ -1986,7 +2090,7 @@ def health():
     return {
         "status":           "ok",
         "utc":              datetime.now(timezone.utc).isoformat(),
-        "version":          "2.3.1",
+        "version":          "2.4.0",
         "t212_base":        opts.get("t212_base", "https://demo.trading212.com"),
         "demo_mode":        "demo" in opts.get("t212_base", "demo"),
         "phase":            opts.get("portfolio_phase", "Momentum-Max"),
@@ -2125,6 +2229,90 @@ def set_phase(body: dict = Body(default={})):
              f"cost={preset['cost_rate_pct']}%  cooldown={preset['min_days_between_rebalance']}d  "
              f"vix_high={preset['vix_high_threshold']}  use_group_weights={ugw}  cooldown_reset={n} snapshots")
     return {"phase": phase, "settings": preset, "use_group_weights": ugw, "cooldown_reset": n}
+
+
+@app.post("/api/set-risk-score")
+def set_risk_score(body: dict = Body(default={})):
+    """Update the user's risk score (0–100) without restarting the add-on.
+    Used by the dashboard slider for live tuning.
+    Body: {"risk_score": 75}
+    """
+    try:
+        score = int(body.get("risk_score"))
+    except (TypeError, ValueError):
+        raise HTTPException(400, 'Body must be {"risk_score": <int 0-100>}')
+    if not 0 <= score <= 100:
+        raise HTTPException(400, "risk_score must be between 0 and 100")
+
+    opts = _read_options()
+    opts["risk_score"] = score
+    try:
+        _write_options(opts)
+    except Exception as exc:
+        raise HTTPException(500, f"Failed to write options.json: {exc}")
+    log.info(f"Risk score set to {score} (next snapshot will use this)")
+    return {"risk_score": score, "note": "Run a snapshot to see updated targets."}
+
+
+@app.post("/api/notch-up")
+def notch_up_cooldown():
+    """Set a one-shot flag that bypasses the rebalance cooldown for the NEXT snapshot.
+    Use this when you want to force a rebalance during a strong market move
+    (bull run-up or bear sell-off) without waiting for the 21-day cooldown to expire.
+    Flag is consumed (cleared) the moment the next snapshot uses it.
+    """
+    conn = get_db()
+    _set_runtime_flag(conn, "notch_up_pending", "1")
+    conn.close()
+    log.info("Manual notch-up requested — next snapshot will bypass cooldown")
+    return {
+        "notch_up_pending": True,
+        "note": "Next snapshot will bypass cooldown. Run /api/collect to consume.",
+    }
+
+
+@app.post("/api/cancel-notch-up")
+def cancel_notch_up():
+    """Clear a previously-set notch-up flag without consuming it."""
+    conn = get_db()
+    _clear_runtime_flag(conn, "notch_up_pending")
+    conn.close()
+    return {"notch_up_pending": False}
+
+
+@app.get("/api/risk-state")
+def risk_state():
+    """Inspect the current dynamic-mode runtime state at a glance."""
+    cfg = load_config()
+    conn = get_db()
+    notch = _get_runtime_flag(conn, "notch_up_pending") == "1"
+    last  = conn.execute(
+        "SELECT as_of, metadata_json FROM snapshots ORDER BY as_of DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    last_meta = {}
+    if last and last["metadata_json"]:
+        try:
+            last_meta = json.loads(last["metadata_json"])
+        except Exception:
+            pass
+    return {
+        "weight_mode":                          cfg["weight_mode"],
+        "risk_score":                           cfg["risk_score"],
+        "auto_adjust_enabled":                  cfg["auto_adjust_enabled"],
+        "auto_adjust_aggressiveness":           cfg["auto_adjust_aggressiveness"],
+        "auto_adjust_direction":                cfg["auto_adjust_direction"],
+        "cooldown_override_enabled":            cfg["cooldown_override_enabled"],
+        "cooldown_override_vix_threshold":      cfg["cooldown_override_vix_threshold"],
+        "cooldown_override_drawdown_threshold": cfg["cooldown_override_drawdown_threshold"],
+        "notch_up_pending":                     notch,
+        "last_snapshot": {
+            "as_of":                 last["as_of"] if last else None,
+            "effective_risk":        last_meta.get("effective_risk"),
+            "effective_risk_reason": last_meta.get("effective_risk_reason"),
+            "drawdown_pct":          last_meta.get("drawdown_pct"),
+        },
+    }
 
 
 @app.get("/api/groups")
@@ -2311,7 +2499,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     # Always advertise the running collector version so HA sensors / dashboards
     # can confirm the add-on actually upgraded after a Supervisor update.
-    d["collector_version"] = "2.3.1"
+    d["collector_version"] = "2.4.0"
     for f in ["positions_json", "benchmarks_json", "drift_json", "momentum_json", "suggested_actions"]:
         key = f.replace("_json", "")
         d[key] = json.loads(d.pop(f) or ("[]" if f == "suggested_actions" else "{}"))
@@ -2353,7 +2541,7 @@ if __name__ == "__main__":
     # and ensures the /groups page works behind the ingress proxy.
     ingress_path = os.getenv("INGRESS_PATH", "")
     log.info(
-        f"Portfolio Collector v2.3.1 — phase={cfg['portfolio_phase']} — "
+        f"Portfolio Collector v2.4.0 — phase={cfg['portfolio_phase']} — "
         f"weight_mode={cfg['weight_mode']} — "
         f"DB: {DB_PATH} — T212: {cfg['t212_base']} — ingress={ingress_path or 'none'}"
     )

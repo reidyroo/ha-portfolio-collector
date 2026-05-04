@@ -5,7 +5,7 @@ description: >
   scores momentum, benchmarks against MSCI World / S&P 500 / FTSE 100 / DOW / VIX,
   and suggests rebalance trades for manual approval. No holdings list required —
   T212 is the source of truth.
-version: "2.3.1"
+version: "2.4.0"
 slug: portfolio_collector
 init: false
 url: "https://github.com/YOUR_GITHUB_USERNAME/ha-portfolio-collector"
@@ -69,6 +69,18 @@ options:
   # Maximum auto-shift magnitude (low=5pts, medium=10pts, high=20pts).
   auto_adjust_aggressiveness: "medium"
 
+  # "defensive_only" — VIX/drawdown can pull effective risk DOWN only.
+  # "bidirectional" — also let strong 21-day rallies push risk UP (capped at +5pts).
+  auto_adjust_direction: "defensive_only"
+
+  # Allow VIX spikes / large drawdowns to bypass the rebalance cooldown so a
+  # defensive rebalance can fire during sharp market moves.
+  cooldown_override_enabled: false
+
+  # Override-trigger thresholds (defaults: vix_high+5, -15% drawdown)
+  cooldown_override_vix_threshold: 30
+  cooldown_override_drawdown_threshold: -15
+
   # Legacy boolean — kept for backwards compatibility with older configs.
   # If weight_mode is set, this is ignored.  If weight_mode is empty, then
   # use_group_weights=true behaves like weight_mode="equal_in_group".
@@ -103,6 +115,10 @@ schema:
   risk_score: int(0,100)?
   auto_adjust_enabled: bool?
   auto_adjust_aggressiveness: list(low|medium|high)?
+  auto_adjust_direction: list(defensive_only|bidirectional)?
+  cooldown_override_enabled: bool?
+  cooldown_override_vix_threshold: float?
+  cooldown_override_drawdown_threshold: float?
   max_cvar_pct: float
   cost_rate_pct: float
   max_snapshot_change_pct: int

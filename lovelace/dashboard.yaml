@@ -22,6 +22,10 @@ views:
           {% endif %}
           · **Drawdown:** {{ state_attr('sensor.portfolio_value', 'drawdown_pct') }}%
           · **Snapshot:** {{ state_attr('sensor.portfolio_value', 'as_of') or 'none yet' }}
+          {% if state_attr('sensor.portfolio_value', 'cooldown_override_used') %}
+
+          ⚠ **Cooldown override:** {{ state_attr('sensor.portfolio_value', 'cooldown_override_reason') }}
+          {% endif %}
 
       # ── Header: value / return / cash / VIX ──────────────────────────────
       - type: glance
@@ -326,6 +330,78 @@ views:
               ~0% across the board and no rebalance will fire until the
               portfolio actually moves. Only affects "use_group_weights=False"
               mode. Continue?
+
+      # ── Risk score (dynamic mode) ─────────────────────────────────────────
+      - type: entities
+        title: Dynamic Risk Score
+        show_header_toggle: false
+        entities:
+          - entity: input_number.portfolio_risk_score
+            name: Risk Score (0–100)
+            secondary_info: last-changed
+        footer:
+          type: buttons
+          entities:
+            - entity: input_number.portfolio_risk_score
+              name: Pre-Retirement (15)
+              tap_action:
+                action: call-service
+                service: input_number.set_value
+                data:
+                  entity_id: input_number.portfolio_risk_score
+                  value: 15
+            - entity: input_number.portfolio_risk_score
+              name: Balanced (45)
+              tap_action:
+                action: call-service
+                service: input_number.set_value
+                data:
+                  entity_id: input_number.portfolio_risk_score
+                  value: 45
+            - entity: input_number.portfolio_risk_score
+              name: Chill (65)
+              tap_action:
+                action: call-service
+                service: input_number.set_value
+                data:
+                  entity_id: input_number.portfolio_risk_score
+                  value: 65
+            - entity: input_number.portfolio_risk_score
+              name: Max (90)
+              tap_action:
+                action: call-service
+                service: input_number.set_value
+                data:
+                  entity_id: input_number.portfolio_risk_score
+                  value: 90
+
+      # ── Cooldown override (notch up) ──────────────────────────────────────
+      - type: markdown
+        content: |
+          **Cooldown override:** allow the next snapshot to fire a rebalance
+          even if the {{ state_attr('sensor.rebalance_signal', 'min_days') or 21 }}-day cooldown is still active.
+          Use during sharp market moves (bull run-up or bear sell-off).
+          One-shot — clears automatically when consumed.
+
+      - type: horizontal-stack
+        cards:
+          - type: button
+            name: Notch Up — Bypass Cooldown
+            icon: mdi:rocket-launch-outline
+            tap_action:
+              action: call-service
+              service: rest_command.notch_up_cooldown
+              confirmation:
+                text: >
+                  Allow the NEXT snapshot to fire a rebalance regardless of
+                  cooldown. Useful when you want to act on a strong market
+                  move without waiting. Continue?
+          - type: button
+            name: Cancel Notch-Up
+            icon: mdi:close-circle-outline
+            tap_action:
+              action: call-service
+              service: rest_command.cancel_notch_up
 
       - type: button
         name: Run Snapshot Now

@@ -4,6 +4,52 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [2.4.0] — 2026-05-04
+
+### Added — cooldown override + live risk tuning + bidirectional auto-adjust
+
+**Cooldown override** — bypass the 21-day rebalance cooldown during sharp
+market moves:
+
+- **Auto override** (when `cooldown_override_enabled: true`): VIX above
+  `cooldown_override_vix_threshold` (default 30) or drawdown below
+  `cooldown_override_drawdown_threshold` (default -15%) lets a defensive
+  rebalance fire even within cooldown.
+- **Manual notch-up** (one-shot): `POST /api/notch-up` sets a flag; the next
+  snapshot bypasses cooldown and consumes the flag automatically.
+- New endpoints: `POST /api/notch-up`, `POST /api/cancel-notch-up`.
+- New `runtime_state` SQLite table for transient flags.
+- Dashboard: **Notch Up — Bypass Cooldown** + **Cancel Notch-Up** buttons on
+  the Rebalance tab.
+- Snapshot metadata now records `cooldown_override_used` and
+  `cooldown_override_reason`.
+- HA automation `portfolio_cooldown_override_fired` sends a notification
+  whenever an override actually consumes.
+
+**Live risk-score tuning** — adjust dynamic-mode risk without opening the
+add-on Configuration tab:
+
+- New `input_number.portfolio_risk_score` (0–100, step 5).
+- New `POST /api/set-risk-score` endpoint writes to options.json on demand.
+- HA automation `portfolio_risk_score_change` watches the slider and pushes
+  changes to the add-on automatically.
+- Dashboard: risk slider with quick-set buttons (Pre-Retirement 15 /
+  Balanced 45 / Chill 65 / Max 90) on the Rebalance tab.
+
+**Bidirectional auto-adjust** — let strong rallies push effective risk UP:
+
+- New `auto_adjust_direction` option (default `defensive_only`).
+- Set to `bidirectional` to allow strong 21-day portfolio rallies above +5%
+  to push effective risk up by up to +5 points (capped so it can't overwhelm
+  the user's set risk_score).
+
+**Inspection endpoint:**
+
+- `GET /api/risk-state` — single one-stop view of weight_mode, risk_score,
+  effective risk from last snapshot, override status, all auto-adjust config.
+
+---
+
 ## [2.3.1] — 2026-05-03
 
 ### Fixed

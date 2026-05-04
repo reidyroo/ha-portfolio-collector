@@ -429,27 +429,73 @@ the risk score).
 
 #### Optional auto-adjustment from market signals
 
-When `auto_adjust_enabled: true`, two live signals can lower the **effective**
-risk score below your set value:
+When `auto_adjust_enabled: true`, live signals can shift the **effective**
+risk score from your set value:
 
-| Signal | Effect |
-|---|---|
-| VIX above `vix_high_threshold` (default 25) | Risk shifts down proportionally; capped at the aggressiveness max at VIX = high+15 |
-| Portfolio drawdown below -10% from peak | Additional shift down, up to half the max, scaling linearly to -30% |
+| Direction | Signal | Effect |
+|---|---|---|
+| ⬇ Defensive | VIX above `vix_high_threshold` (default 25) | Risk shifts down proportionally; capped at aggressiveness max at VIX = high+15 |
+| ⬇ Defensive | Portfolio drawdown below -10% from peak | Additional shift down, up to half the max, scaling linearly to -30% |
+| ⬆ Aggressive *(`auto_adjust_direction: bidirectional` only)* | 21-day portfolio rally above +5% | Risk shifts up proportionally, capped at +5pts so it can't overwhelm your set value |
 
-`auto_adjust_aggressiveness` caps the maximum shift:
+`auto_adjust_aggressiveness` caps the defensive shift:
 
 - `low` → ±5 points
 - `medium` → ±10 points (default)
 - `high` → ±20 points
+
+`auto_adjust_direction`:
+
+- `defensive_only` (default) — only VIX/drawdown shifts apply (always toward safety)
+- `bidirectional` — also lean in on strong positive momentum
 
 The user's `risk_score` is never modified — only the **effective_risk** the
 snapshot uses for that run. Dashboard banner shows both:
 
 > **Risk:** 75 → effective 70.5 (VIX=27.0(-1.5); DD=-12.3%(-3.0))
 
-This gives you a defensive auto-bias when markets get rough, while keeping
-your underlying preference unchanged for when conditions return to normal.
+When VIX normalises and drawdown closes, effective risk snaps back to your set
+value automatically — no manual reset needed.
+
+#### Live tuning via the dashboard slider
+
+A **Risk Score slider** on the Rebalance dashboard tab (HA `input_number.portfolio_risk_score`)
+calls `POST /api/set-risk-score` automatically when moved. Quick-set buttons
+underneath jump to each phase anchor (15 / 45 / 65 / 90). Slider movement is
+captured by the `portfolio_risk_score_change` automation; a notification
+confirms the new value, and the next snapshot picks it up.
+
+### Cooldown override
+
+By default, an executed rebalance starts a 21-day cooldown to prevent
+trade churn. Two ways to bypass it during sharp market moves:
+
+#### Auto override (set-and-forget)
+
+Enable `cooldown_override_enabled: true`. The cooldown is bypassed automatically
+when:
+
+- VIX exceeds `cooldown_override_vix_threshold` (default `vix_high_threshold + 5`, i.e. 30), **or**
+- Drawdown exceeds `cooldown_override_drawdown_threshold` (default -15%)
+
+Combined with `auto_adjust_enabled`, this lets the system drift defensively in
+a real sell-off without you needing to act.
+
+#### Manual notch-up (one-shot)
+
+Click **Notch Up — Bypass Cooldown** on the Rebalance dashboard tab, or:
+
+```bash
+curl -X POST http://192.168.1.6:8000/api/notch-up
+```
+
+The next snapshot ignores cooldown for that run only; the flag is consumed
+automatically. Useful when you spot a strong move and want to force a rebalance
+without waiting (or without enabling permanent auto-override). Cancel with
+**Cancel Notch-Up** if you change your mind before the next snapshot.
+
+A persistent HA notification fires whenever any override actually consumes —
+you'll always know when one took effect.
 
 ### Legacy compatibility
 
@@ -546,6 +592,10 @@ The add-on serves a REST API on port 8000.
 | `POST` | `/api/approve/{as_of}` | Approve rebalance; `?execute=true` places live orders |
 | `POST` | `/api/reset-cooldown` | Clear the rebalance cooldown |
 | `POST` | `/api/set-phase` | Body `{"phase":"Momentum-Chill"}`; writes to options.json |
+| `POST` | `/api/set-risk-score` | Body `{"risk_score": 75}`; live-tune dynamic mode |
+| `POST` | `/api/notch-up` | Set one-shot flag: next snapshot bypasses cooldown |
+| `POST` | `/api/cancel-notch-up` | Clear a pending notch-up flag without consuming |
+| `GET` | `/api/risk-state` | Inspect dynamic-mode + override runtime state |
 | `POST` | `/api/sync-t212-weights` | Reset stored target weights to current T212 actuals |
 | `GET` | `/api/groups` | List all instrument group assignments |
 | `POST` | `/api/groups/{ticker}` | Set group label; body `{"group":"momentum_core"}` |
