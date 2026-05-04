@@ -153,42 +153,41 @@ lovelace:
       filename: lovelace/dashboard.yaml
 ```
 
-The dashboard URLs default to `http://homeassistant.local:8000/groups`. If that doesn't
-resolve on your network, replace it with HA's static IP:
-
-```bash
-# Replace 192.168.1.6 with your HA's LAN IP from Settings → System → Network
-sed -i 's|http://homeassistant.local:8000|http://192.168.1.6:8000|g' /config/packages/portfolio.yaml
-sed -i 's|http://homeassistant.local:8000|http://192.168.1.6:8000|g' /config/lovelace/dashboard.yaml
-```
+As of v2.5.0 the dashboard does not embed any external URLs — all controls
+talk to the add-on through HA Core's loopback (`http://localhost:8000`),
+which only HA itself can reach. There's nothing to rewrite on your LAN.
 
 ### 5. Restart Home Assistant Core
 
 Settings → System → ⋮ → Restart → **Restart Home Assistant Core**.
 
-This loads the package sensors, the REST commands (including `sync_t212_weights`),
-the dashboard, and the Portfolio Groups sidebar panel.
+This loads the package sensors, REST commands (`sync_t212_weights`,
+`assign_instrument_group`, `set_risk_score`, `notch_up_cooldown`), and the
+**Investment Monitor** dashboard with its five views.
 
 ### 6. First snapshot + steady state
 
-```bash
-HA_IP=192.168.1.6   # ← your HA's LAN IP
+All curl commands below run from inside HA's Terminal & SSH add-on (or via
+SSH to your HA host). The add-on listens on `http://localhost:8000` from
+that vantage point. From any other machine on your LAN, substitute your
+HA's IP address (Settings → System → Network).
 
+```bash
 # 1. Confirm add-on is healthy
-curl -s http://$HA_IP:8000/api/health
+curl -s http://localhost:8000/api/health
 
 # 2. Run the first snapshot — populates instrument catalog + initial weights
-curl -X POST http://$HA_IP:8000/api/collect
+curl -X POST http://localhost:8000/api/collect
 
 # 3. Sync the stored target weights to your live T212 actuals
 #    (gives ~0% drift baseline for the next snapshot)
-curl -X POST http://$HA_IP:8000/api/sync-t212-weights
+curl -X POST http://localhost:8000/api/sync-t212-weights
 
 # 4. Run a second snapshot — drift should now be ~0% across the board
-curl -X POST http://$HA_IP:8000/api/collect
+curl -X POST http://localhost:8000/api/collect
 
 # 5. Inspect the result
-curl -s http://$HA_IP:8000/api/latest-snapshot | python3 -c "
+curl -s http://localhost:8000/api/latest-snapshot | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 print(f'rebalance_needed: {d[\"rebalance_needed\"]}   '
@@ -251,7 +250,7 @@ ha addons rebuild 54e2df00_portfolio_collector
 ha addons restart 54e2df00_portfolio_collector
 
 # Confirm the new version is actually running
-curl -s http://$HA_IP:8000/api/health | python3 -c "import sys,json; print('v'+json.load(sys.stdin)['version'])"
+curl -s http://localhost:8000/api/health | python3 -c "import sys,json; print('v'+json.load(sys.stdin)['version'])"
 ```
 
 If "Update available" appears in the Add-on Store before you do this, the regular Update
@@ -270,29 +269,30 @@ curl -fsSL https://raw.githubusercontent.com/reidyroo/ha-portfolio-collector/mai
 chmod +x /config/sync_portfolio_files.sh
 ```
 
-**Run it any time** (passing your static IP as an env var so the iframe / dashboard
-button URLs get rewritten to the LAN address):
+**Run it any time:**
 
 ```bash
-HA_IP=192.168.1.6 /config/sync_portfolio_files.sh
+/config/sync_portfolio_files.sh
 ```
-
-If `homeassistant.local` resolves cleanly on your network, leave `HA_IP` unset — the
-upstream URLs will be kept as-is.
 
 The script does:
 
 1. `curl` the latest `packages/portfolio.yaml` to `/config/packages/portfolio.yaml`
 2. `curl` the latest `lovelace/dashboard.yaml` to `/config/lovelace/dashboard.yaml`
-3. `sed` rewrite `homeassistant.local` → `$HA_IP` in both files (if `HA_IP` is set)
-4. `ha core check` to catch YAML errors before restarting
-5. `ha core restart` to reload package sensors, REST commands, and the dashboard
+3. `ha core check` to catch YAML errors before restarting
+4. `ha core restart` to reload package sensors, REST commands, and the dashboard
+
+> Since v2.5.0 the dashboard talks to the add-on only via `http://localhost:8000`
+> from HA Core, so there's no `homeassistant.local` → `IP` rewrite to do anymore.
+> If you've migrated from an older snapshot of the YAML files that still
+> references `homeassistant.local:8000`, set `HA_IP=<your-ha-ip>` before
+> running the script and it will substitute. Fresh deploys don't need it.
 
 ### Verify after sync
 
 ```bash
 # Add-on version
-curl -s http://$HA_IP:8000/api/health | python3 -c "import sys,json; d=json.load(sys.stdin); print('v'+d['version'])"
+curl -s http://localhost:8000/api/health | python3 -c "import sys,json; d=json.load(sys.stdin); print('v'+d['version'])"
 
 # Package YAML has the latest REST commands
 grep -c "sync_t212_weights" /config/packages/portfolio.yaml   # ≥ 1
@@ -498,7 +498,7 @@ a real sell-off without you needing to act.
 Click **Notch Up — Bypass Cooldown** on the Rebalance dashboard tab, or:
 
 ```bash
-curl -X POST http://192.168.1.6:8000/api/notch-up
+curl -X POST http://localhost:8000/api/notch-up
 ```
 
 The next snapshot ignores cooldown for that run only; the flag is consumed
@@ -619,22 +619,21 @@ The add-on serves a REST API on port 8000.
 
 ## Diagnostics
 
-A grab-bag of one-liner curl commands. Set `HA_IP` first:
-
-```bash
-HA_IP=192.168.1.6
-```
+A grab-bag of one-liner curl commands. Run them from inside HA's Terminal &
+SSH add-on (or via SSH to your HA host) where `localhost:8000` reaches the
+collector. From another machine on your LAN, substitute HA's IP for
+`localhost`.
 
 ### Verify the add-on version
 
 ```bash
-curl -s http://$HA_IP:8000/api/health | python3 -c "import sys,json; d=json.load(sys.stdin); print('v'+d['version'], '— phase:', d['phase'])"
+curl -s http://localhost:8000/api/health | python3 -c "import sys,json; d=json.load(sys.stdin); print('v'+d['version'], '— phase:', d['phase'])"
 ```
 
 ### Inspect stored group / weight state
 
 ```bash
-curl -s http://$HA_IP:8000/api/groups | python3 -c "
+curl -s http://localhost:8000/api/groups | python3 -c "
 import sys, json
 rows = json.load(sys.stdin)
 total = sum(r['initial_weight_pct'] for r in rows)
@@ -647,13 +646,13 @@ for r in sorted(rows, key=lambda x: -x['initial_weight_pct']):
 ### Inspect the validator recovery baseline
 
 ```bash
-curl -s http://$HA_IP:8000/api/last-good-targets | python3 -m json.tool
+curl -s http://localhost:8000/api/last-good-targets | python3 -m json.tool
 ```
 
 ### Latest snapshot — full position table
 
 ```bash
-curl -s http://$HA_IP:8000/api/latest-snapshot | python3 -c "
+curl -s http://localhost:8000/api/latest-snapshot | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 print(f'snapshot: {d[\"as_of\"]}  collector_version: {d.get(\"collector_version\")}')
@@ -730,7 +729,7 @@ each holding receives `100/n%` as target. Not ideal, but never destructive.
 You can inspect the current recovery baseline:
 
 ```bash
-curl -s http://$HA_IP:8000/api/last-good-targets | python3 -m json.tool
+curl -s http://localhost:8000/api/last-good-targets | python3 -m json.tool
 ```
 
 ---
@@ -741,12 +740,12 @@ curl -s http://$HA_IP:8000/api/last-good-targets | python3 -m json.tool
 
 1. **Force a fresh snapshot** — old behaviour may be cached:
    ```bash
-   curl -X POST http://$HA_IP:8000/api/collect
+   curl -X POST http://localhost:8000/api/collect
    ```
 2. **If targets still look wrong** — sync to live T212 actuals:
    ```bash
-   curl -X POST http://$HA_IP:8000/api/sync-t212-weights
-   curl -X POST http://$HA_IP:8000/api/collect
+   curl -X POST http://localhost:8000/api/sync-t212-weights
+   curl -X POST http://localhost:8000/api/collect
    ```
 3. **Check `use_group_weights`** — if you didn't intend phase-driven targets, set it
    to `false` in the Configuration tab and run a snapshot.
@@ -760,7 +759,7 @@ Supervisor sometimes reuses cached Docker images. Force a clean rebuild:
 ```bash
 ha addons rebuild 54e2df00_portfolio_collector
 ha addons restart 54e2df00_portfolio_collector
-curl -s http://$HA_IP:8000/api/health  # confirm new version
+curl -s http://localhost:8000/api/health  # confirm new version
 ```
 
 If `Rebuild` itself doesn't help: stop, **uninstall (without ticking "Remove data")**,
@@ -790,7 +789,7 @@ Your initial install pre-dates `ingress: true` in `config.yaml`. Either:
 Press **Reset Rebalance Cooldown** on the Rebalance dashboard tab, or:
 
 ```bash
-curl -X POST http://$HA_IP:8000/api/reset-cooldown
+curl -X POST http://localhost:8000/api/reset-cooldown
 ```
 
 ---
@@ -822,7 +821,7 @@ portfolios are handled correctly.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `404 No snapshots yet` | First run | `curl -X POST http://$HA_IP:8000/api/collect` |
+| `404 No snapshots yet` | First run | `curl -X POST http://localhost:8000/api/collect` |
 | Dashboard sensors `Unavailable` | Package not loaded | Check `/config/packages/portfolio.yaml` exists; restart HA Core |
 | `Action rest_command.sync_t212_weights not found` | HA hasn't reloaded since package was deployed | Restart HA Core |
 | Add-on log: `IITU possibly delisted` | Version older than 2.0.6 | Rebuild add-on; v2.0.6+ resolves bare `_EQ` tickers to `.L` |
