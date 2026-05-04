@@ -4,6 +4,19 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [2.5.2] — 2026-05-04
+
+### Changed (docs only — no code change)
+- README rewritten to reflect the simplified v2.5.x setup: all curl examples
+  use `localhost:8000` (HA Terminal & SSH add-on context); LAN-IP rewriting
+  removed from setup steps and from `sync_portfolio_files.sh`; stale
+  `panel_iframe` comments removed from `packages/portfolio.yaml`.
+- All hard-coded LAN IPs purged from the repo.
+- Version bumped purely to keep `collector_version` reported by the add-on
+  in lockstep with the README/CHANGELOG copy on GitHub `main`.
+
+---
+
 ## [2.5.1] — 2026-05-04
 
 ### Removed
