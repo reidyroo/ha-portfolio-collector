@@ -5,7 +5,7 @@ description: >
   scores momentum, benchmarks against MSCI World / S&P 500 / FTSE 100 / DOW / VIX,
   and suggests rebalance trades for manual approval. No holdings list required —
   T212 is the source of truth.
-version: "2.5.0"
+version: "2.5.1"
 slug: portfolio_collector
 init: false
 url: "https://github.com/YOUR_GITHUB_USERNAME/ha-portfolio-collector"
@@ -18,8 +18,10 @@ arch:
 startup: application
 boot: auto
 host_network: true    # Required so HA core can reach port 8000 via localhost
-ingress: true
-ingress_port: 8000
+# Ingress was removed in v2.5.1 — group assignment is done entirely inside the
+# HA dashboard now (see packages/portfolio.yaml).  Removing `ingress: true` and
+# `ingress_port` hides the "Open Web UI" button from the add-on info page so
+# users aren't tempted down a broken-by-default network path.
 
 map:
   - data:rw           # Persistent SQLite DB at /data/portfolio.db
@@ -124,5 +126,6 @@ schema:
   max_snapshot_change_pct: int
   catalog_cache_ttl_sec: int
 
-panel_icon: mdi:chart-line
-panel_title: Portfolio
+# panel_icon / panel_title also removed — they only render anything when
+# ingress is enabled.  The Investment Monitor sidebar entry comes from the
+# Lovelace dashboard registration in configuration.yaml instead.

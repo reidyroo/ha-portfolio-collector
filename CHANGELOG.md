@@ -4,6 +4,28 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [2.5.1] — 2026-05-04
+
+### Removed
+- **`ingress: true`, `ingress_port`, `panel_icon`, `panel_title`** dropped from
+  `config.yaml`. The "Open Web UI" button on the add-on info page is now gone,
+  along with the Portfolio sidebar entry that the ingress system would have
+  provided. Both pointed at functionality that has been moved into the HA
+  dashboard in v2.5.0; keeping them around led users into a frequently-broken
+  ingress path.
+- The Investment Monitor sidebar link comes from the Lovelace dashboard
+  registration in `configuration.yaml` (unchanged), not from the add-on
+  panel.  All group / phase / risk controls are reachable via the dashboard.
+- Add-on `host_network: true` is retained so HA Core can still reach
+  `http://localhost:8000` for REST commands.
+
+### Migration
+Existing installs with ingress already registered will see the "Open Web UI"
+button disappear after rebuilding to v2.5.1. No DB or configuration changes
+required.
+
+---
+
 ## [2.5.0] — 2026-05-04
 
 ### Changed — group assignment now lives entirely in HA dashboard
