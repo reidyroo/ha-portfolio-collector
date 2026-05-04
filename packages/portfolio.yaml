@@ -10,12 +10,12 @@
 # Uses the add-on's direct port (8000) — works without HA ingress registration.
 # If homeassistant.local doesn't resolve on your network, replace with your
 # HA box's local IP address (e.g. http://192.168.1.x:8000/groups).
-panel_iframe:
-  portfolio_groups:
-    title: "Portfolio Groups"
-    icon: mdi:tag-multiple-outline
-    url: "http://homeassistant.local:8000/groups"
-    require_admin: false
+# NOTE: The Portfolio Groups sidebar `panel_iframe` was removed in v2.5.0.
+# Group assignment is now done via the in-dashboard "Groups" view using native
+# HA dropdowns + REST command — no external URL, no DNS / firewall concerns.
+# The /groups HTML endpoint on the add-on is still available at
+# http://<HA-IP>:8000/groups for power users / curl scripts, but is no longer
+# required for normal use.
 
 
 # ── REST sensors — reads from collector add-on ───────────────────────────────
@@ -158,6 +158,27 @@ input_select:
     initial: "Momentum-Chill"
     icon: mdi:tune-variant
 
+  # Group-assignment helpers — populated dynamically by the
+  # `portfolio_refresh_instrument_dropdown` automation each time a snapshot
+  # lands.  Format: "VWRL.L (VWRLl_EQ)" — friendly + canonical T212 ticker.
+  portfolio_assign_instrument:
+    name: "Instrument"
+    options:
+      - "(no snapshot yet — run one to populate)"
+    icon: mdi:format-list-bulleted-square
+
+  portfolio_assign_group:
+    name: "Target group"
+    options:
+      - "momentum_core"
+      - "global_beta"
+      - "regional_satellite"
+      - "defensive"
+      - "optional_factor"
+      - "unassigned"
+    initial: "global_beta"
+    icon: mdi:tag-outline
+
 
 # ── Input numbers ────────────────────────────────────────────────────────────
 input_number:
@@ -282,6 +303,20 @@ rest_command:
     url: "http://localhost:8000/api/cancel-notch-up"
     method: POST
     content_type: "application/json"
+    timeout: 10
+
+  # Apply the group selected in the dashboard dropdowns.
+  # Extracts the t212_ticker from inside the parens of the input_select option
+  # (format: "VWRL.L (VWRLl_EQ)" → "VWRLl_EQ"), URL-encodes it, then POSTs
+  # the chosen group label.
+  assign_instrument_group:
+    url: >
+      http://localhost:8000/api/groups/{{
+        states('input_select.portfolio_assign_instrument').split('(')[1].split(')')[0] | urlencode
+      }}
+    method: POST
+    content_type: "application/json"
+    payload: '{"group": "{{ states(''input_select.portfolio_assign_group'') }}"}'
     timeout: 10
 
   set_portfolio_phase:
@@ -416,6 +451,42 @@ automation:
             cooldown, and VIX threshold have been reconfigured.
             Group weighting has been enabled automatically.
             Run a new snapshot to apply the changes to rebalance calculations.
+
+  - id: portfolio_refresh_instrument_dropdown
+    alias: "Portfolio: Refresh group-assignment dropdown options"
+    trigger:
+      - platform: state
+        entity_id: sensor.portfolio_snapshot
+      - platform: homeassistant
+        event: start
+    action:
+      - service: input_select.set_options
+        target:
+          entity_id: input_select.portfolio_assign_instrument
+        data:
+          options: >
+            {% set positions = state_attr('sensor.portfolio_snapshot', 'positions') or [] %}
+            {% set ns = namespace(opts=[]) %}
+            {% for p in positions | sort(attribute='symbol') %}
+              {% set ns.opts = ns.opts + [p.symbol ~ ' (' ~ p.t212_ticker ~ ')'] %}
+            {% endfor %}
+            {{ ns.opts if ns.opts else ['(no snapshot yet — run one to populate)'] }}
+
+  - id: portfolio_assign_instrument_done
+    alias: "Portfolio: Notify after a group is applied"
+    trigger:
+      - platform: event
+        event_type: call_service
+        event_data:
+          domain: rest_command
+          service: assign_instrument_group
+    action:
+      - service: notify.persistent_notification
+        data:
+          title: "Group assigned"
+          message: >
+            {{ states('input_select.portfolio_assign_instrument') }} → {{ states('input_select.portfolio_assign_group') }}.
+            Click *Run Snapshot Now* on the Groups view to refresh dashboard.
 
   - id: portfolio_unassigned_instruments
     alias: "Portfolio: Alert when new unassigned instruments detected"

@@ -207,9 +207,21 @@ rounding. If anything is off, see [Diagnostics](#diagnostics) and [Recovery](#re
 
 ### 7. Assign groups to instruments
 
-By default, every instrument is `unassigned`. Click **Open Group Manager** on the dashboard
-or open `http://<HA-IP>:8000/groups` directly. Each row has a dropdown — assign each
-holding to one of the five groups. Changes save automatically.
+By default, every new instrument is `unassigned`. Open the **Groups** view on the dashboard:
+
+1. **Pick an instrument** from the dropdown (populated from the latest snapshot)
+2. **Pick a target group** from the dropdown
+3. Click **APPLY** — fires `rest_command.assign_instrument_group` which POSTs to the
+   add-on, updating the SQLite `instrument_groups` table immediately
+4. A persistent notification confirms the change
+5. Click **Run Snapshot Now (refresh table)** to recompute targets with the new group
+
+The table at the bottom of the view shows the current state of every holding —
+unassigned rows are highlighted 🟡 with a count summary.
+
+Everything stays within HA's auth boundary — no external URL, no DNS or firewall
+accommodation needed. The legacy `/groups` HTML endpoint on the add-on still works
+(`http://<HA-IP>:8000/groups`) for power users / curl, but is no longer the supported path.
 
 Until at least one instrument has a group, group-based weight derivation falls back to
 treating everything as `global_beta`.

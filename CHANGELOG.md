@@ -4,6 +4,42 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [2.5.0] — 2026-05-04
+
+### Changed — group assignment now lives entirely in HA dashboard
+- **Removed** the `panel_iframe.portfolio_groups` sidebar entry. Group
+  assignment no longer requires the external `http://<HA-IP>:8000/groups`
+  page, an HA ingress route, or any DNS / firewall accommodation. Everything
+  stays inside HA's auth boundary.
+- **New** in-dashboard assignment flow on the Groups view:
+  - `input_select.portfolio_assign_instrument` — populated dynamically from
+    each snapshot's positions list (format: `"VWRL.L (VWRLl_EQ)"`).
+  - `input_select.portfolio_assign_group` — static list of the 5 groups +
+    unassigned.
+  - **APPLY** call-service row in the entities card runs
+    `rest_command.assign_instrument_group`, which extracts the t212_ticker
+    from the dropdown and POSTs to `/api/groups/{ticker}`.
+- **New automation** `portfolio_refresh_instrument_dropdown` — refreshes the
+  instrument dropdown whenever a new snapshot lands (also at HA startup).
+- **New automation** `portfolio_assign_instrument_done` — persistent
+  notification confirms each assignment with a "Run Snapshot Now to refresh"
+  reminder.
+- **Live assignment table** — markdown card on the Groups view shows current
+  group / symbol / actual% / target% from the most recent snapshot, with
+  unassigned rows highlighted 🟡.
+- **`/groups` HTML endpoint kept** on the add-on for power-users / curl, but
+  no longer the supported path.
+
+### Why
+Old approach required `http://<HA-IP>:8000` to be reachable from your
+browser/phone. Behind Tailscale, split-DNS, or a strict firewall this
+created friction or required exposing the add-on port externally. The new
+approach uses only HA's already-authenticated dashboard + the loopback
+`http://localhost:8000` path that HA Core uses for REST commands — never
+exposed beyond HA itself.
+
+---
+
 ## [2.4.1] — 2026-05-04
 
 ### Added

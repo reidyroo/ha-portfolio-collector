@@ -500,18 +500,63 @@ views:
         content: |
           ## Instrument Groups
 
-          Assign each holding to a group. Groups drive the portfolio phase
-          allocations used for rebalance target weights.
+          Assign each holding to a strategy group. Groups drive phase allocations
+          used for rebalance target weights when `weight_mode` is anything
+          other than `stored`.
 
-          **New instruments** added to your T212 account appear automatically
-          after the next snapshot and are tagged *Unassigned* until you assign them.
+          **New instruments** added to your T212 account appear here automatically
+          after the next snapshot and are tagged **Unassigned** until you classify them.
 
+      # ── Assignment form: pick instrument + group, click Apply ──────────────
+      - type: entities
+        title: Assign Group
+        show_header_toggle: false
+        state_color: false
+        entities:
+          - entity: input_select.portfolio_assign_instrument
+            name: 1. Pick instrument
+            icon: mdi:format-list-bulleted-square
+          - entity: input_select.portfolio_assign_group
+            name: 2. Pick group
+            icon: mdi:tag-outline
+          - type: section
+          - type: call-service
+            name: 3. Apply group assignment
+            icon: mdi:content-save-check
+            action_name: APPLY
+            service: rest_command.assign_instrument_group
+
+      # ── Run a snapshot to refresh the table below ─────────────────────────
       - type: button
-        name: Open Group Manager
-        icon: mdi:tag-edit-outline
+        name: Run Snapshot Now (refresh table)
+        icon: mdi:refresh
         tap_action:
-          action: url
-          url_path: "http://homeassistant.local:8000/groups"
+          action: call-service
+          service: rest_command.trigger_portfolio_collect
+
+      # ── Live table of current group assignments (from latest snapshot) ────
+      - type: markdown
+        content: |
+          ### Current assignments
+          *(from snapshot {{ state_attr('sensor.portfolio_snapshot', 'as_of') or 'none yet' }})*
+
+          | Group | Symbol | Actual % | Target % |
+          |---|---|---:|---:|
+          {%- set positions = state_attr('sensor.portfolio_snapshot', 'positions') or [] %}
+          {%- for p in positions | sort(attribute='group_order') %}
+          {%- set group_label = p.group | replace('_', ' ') | title %}
+          {%- if p.group == 'unassigned' %}
+          | 🟡 **{{ group_label }}** | **{{ p.symbol }}** | {{ p.actual_wt | round(1) }} | {{ p.target_wt }} |
+          {%- else %}
+          | {{ group_label }} | **{{ p.symbol }}** | {{ p.actual_wt | round(1) }} | {{ p.target_wt }} |
+          {%- endif %}
+          {%- endfor %}
+
+          {% set unassigned = (positions | selectattr('group', 'eq', 'unassigned') | list | length) %}
+          {% if unassigned > 0 %}
+          ⚠ **{{ unassigned }} instrument(s) need a group** — pick them in the
+          dropdown above and assign.
+          {% endif %}
 
       - type: glance
         title: Returns Since Purchase (%)
