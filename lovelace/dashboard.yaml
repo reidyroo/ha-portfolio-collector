@@ -540,15 +540,16 @@ views:
           ### Current assignments
           *(from snapshot {{ state_attr('sensor.portfolio_snapshot', 'as_of') or 'none yet' }})*
 
-          | Group | Symbol | Actual % | Target % |
-          |---|---|---:|---:|
+          | Group | Symbol | Actual % | Target % | Tradeable |
+          |---|---|---:|---:|:---:|
           {%- set positions = state_attr('sensor.portfolio_snapshot', 'positions') or [] %}
           {%- for p in positions | sort(attribute='group_order') %}
           {%- set group_label = p.group | replace('_', ' ') | title %}
+          {%- set untrade = '🚫' if p.tradeable == false else '✅' %}
           {%- if p.group == 'unassigned' %}
-          | 🟡 **{{ group_label }}** | **{{ p.symbol }}** | {{ p.actual_wt | round(1) }} | {{ p.target_wt }} |
+          | 🟡 **{{ group_label }}** | **{{ p.symbol }}** | {{ p.actual_wt | round(1) }} | {{ p.target_wt }} | {{ untrade }} |
           {%- else %}
-          | {{ group_label }} | **{{ p.symbol }}** | {{ p.actual_wt | round(1) }} | {{ p.target_wt }} |
+          | {{ group_label }} | **{{ p.symbol }}** | {{ p.actual_wt | round(1) }} | {{ p.target_wt }} | {{ untrade }} |
           {%- endif %}
           {%- endfor %}
 
@@ -556,6 +557,15 @@ views:
           {% if unassigned > 0 %}
           ⚠ **{{ unassigned }} instrument(s) need a group** — pick them in the
           dropdown above and assign.
+          {% endif %}
+
+          {% set untradeable = (positions | rejectattr('tradeable') | list | length) %}
+          {% if untradeable > 0 %}
+          🚫 **{{ untradeable }} instrument(s) marked untradeable** — auto-flagged
+          after T212 persistently rejected orders. They appear in actuals but
+          are excluded from rebalance trade plans. Re-enable manually via
+          `POST /api/groups/<ticker>/tradeable {"tradeable": true}` once the
+          underlying position is fixed in T212.
           {% endif %}
 
       - type: glance

@@ -4,6 +4,46 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [2.6.2] — 2026-05-05
+
+### Added — untradeable detection + auto-quarantine
+
+T212 occasionally reports a position via `/api/v0/equity/portfolio` while
+its orders endpoint refuses to recognise it (`selling-equity-not-owned`,
+"owned: 0.0"). This is most common with seeded demo positions and pie /
+auto-invest holdings. v2.6.2 stops fighting them:
+
+- **New `tradeable` column on `instrument_groups`** (default 1). DB
+  migration auto-adds the column on existing installs.
+- **`_alternative_ticker_forms()`** — for any rejected order with the
+  "selling-equity-not-owned" status, the collector retries with
+  alternative ticker forms (compact ↔ canonical XLON). If any form
+  succeeds, that order completes and the instrument stays tradeable.
+- **Auto-quarantine** — if no ticker form succeeds, the instrument is
+  marked `tradeable=0` automatically. Future trade plans skip it
+  entirely; the position still appears on the dashboard with its
+  actual/target weights so you can see the drift, but no orders fire.
+- **`POST /api/groups/{ticker}/tradeable`** with body `{"tradeable": true|false}`
+  — manually toggle the flag. Useful for re-enabling once you've fixed
+  the underlying position in T212, or pre-emptively excluding instruments
+  you don't want the rebalancer to touch.
+- **Dashboard Groups view** now shows a Tradeable column (✅ / 🚫) and a
+  count of untradeable instruments with re-enable instructions.
+
+### Why
+Previous versions kept retrying the same impossible orders every snapshot
+and let the cascade (failed sells → no cash → buys also fail) wreck the
+whole batch. Auto-quarantine breaks that loop: problem instruments get
+flagged once, then the rest of the portfolio rebalances cleanly.
+
+### Migration
+The `tradeable` column is added by the auto-migration. Existing rows
+default to tradeable=1. After the first execution attempt that hits a
+persistent "not-owned" error, that ticker will be flagged 0. Re-enable
+manually via the API once T212-side state allows.
+
+---
+
 ## [2.6.1] — 2026-05-05
 
 ### Fixed — cascade failures during execution

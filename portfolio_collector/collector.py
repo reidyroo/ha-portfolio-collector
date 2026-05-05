@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portfolio Collector — Home Assistant Add-on v2.6.1
+Portfolio Collector — Home Assistant Add-on v2.6.2
 ===================================================
 Monitors a Trading 212 portfolio, computing drift from target weights,
 scoring momentum, benchmarking against major indices, and suggesting
@@ -199,7 +199,7 @@ _T212_EXCHANGE_MAP: list[tuple[str, str]] = [
     ("_US_EQ",   ""),
 ]
 
-app = FastAPI(title="Portfolio Collector", version="2.6.1")
+app = FastAPI(title="Portfolio Collector", version="2.6.2")
 
 
 # ── Ticker utilities ──────────────────────────────────────────────────────────
@@ -389,7 +389,7 @@ def init_db():
             approved_at          TEXT,
             executed             INTEGER DEFAULT 0,
             executed_at          TEXT,
-            -- Generic JSON metadata bag for fields added in v2.6.1+:
+            -- Generic JSON metadata bag for fields added in v2.6.2+:
             -- weight_mode, portfolio_phase, risk_score, effective_risk,
             -- effective_risk_reason, drawdown_pct, dynamic_group_allocations
             metadata_json        TEXT
@@ -415,6 +415,12 @@ def init_db():
             display_name       TEXT NOT NULL DEFAULT '',
             group_label        TEXT NOT NULL DEFAULT 'unassigned',
             initial_weight_pct REAL NOT NULL DEFAULT 0,
+            -- 1 = include in rebalance trade plans (default).
+            -- 0 = T212 has refused orders for this ticker (e.g. seeded demo
+            --     positions that report ownership via portfolio API but
+            --     don't accept orders).  Set automatically after a persistent
+            --     "selling-equity-not-owned" rejection, or manually via the API.
+            tradeable          INTEGER NOT NULL DEFAULT 1,
             updated_at         TEXT NOT NULL
         );
 
@@ -444,7 +450,7 @@ def init_db():
     except Exception:
         pass  # Column already exists — normal on fresh install or after first migration
 
-    # Migration: add metadata_json to existing DBs that predate 2.6.1
+    # Migration: add metadata_json to existing DBs that predate 2.6.2
     try:
         conn.execute("ALTER TABLE snapshots ADD COLUMN metadata_json TEXT")
         conn.commit()
@@ -452,7 +458,7 @@ def init_db():
     except Exception:
         pass
 
-    # Migration: add quantity_precision to instrument_catalog (predates 2.6.1).
+    # Migration: add quantity_precision to instrument_catalog (predates 2.6.2).
     # Existing rows default to 2; the next catalog refresh repopulates from T212.
     try:
         conn.execute("ALTER TABLE instrument_catalog ADD COLUMN quantity_precision INTEGER NOT NULL DEFAULT 2")
@@ -460,6 +466,15 @@ def init_db():
         log.info("DB migration: added quantity_precision column — refresh catalog to populate")
     except Exception:
         pass
+
+    # Migration: add tradeable flag to instrument_groups (predates 2.6.2)
+    try:
+        conn.execute("ALTER TABLE instrument_groups ADD COLUMN tradeable INTEGER NOT NULL DEFAULT 1")
+        conn.commit()
+        log.info("DB migration: added tradeable column to instrument_groups")
+    except Exception:
+        pass
+
     conn.commit()
     conn.close()
     log.info(f"Database ready: {DB_PATH}")
@@ -1182,6 +1197,46 @@ def fetch_instrument_catalog(cfg: dict, force: bool = False) -> dict:
     return catalog
 
 
+def _alternative_ticker_forms(ticker: str) -> list[str]:
+    """Generate plausible alternative T212 ticker forms to try if the primary
+    form is rejected with `selling-equity-not-owned`.  Useful when T212's
+    portfolio API returns one form but the orders endpoint expects another.
+    """
+    alts: list[str] = []
+    if ticker.endswith("l_EQ"):
+        # Compact ISA → canonical XLON
+        alts.append(f"{ticker[:-4]}_EQ_XLON")
+    elif ticker.endswith("_EQ_XLON"):
+        # Canonical XLON → compact ISA
+        alts.append(f"{ticker[:-8]}l_EQ")
+    elif ticker.endswith("_EQ"):
+        # Bare _EQ → both London variants
+        base = ticker[:-3]
+        alts.append(f"{base}l_EQ")
+        alts.append(f"{base}_EQ_XLON")
+    return alts
+
+
+def _mark_untradeable(t212_ticker: str, reason: str) -> None:
+    """Flag an instrument so future trade plans skip it.  Use for tickers
+    whose orders T212 persistently rejects (e.g. seeded demo positions
+    that report ownership via portfolio API but reject orders)."""
+    conn = get_db()
+    try:
+        # Try matching both canonical and any alternative form we know about
+        candidates = {t212_ticker, *_alternative_ticker_forms(t212_ticker)}
+        for tk in candidates:
+            cur = conn.execute(
+                "UPDATE instrument_groups SET tradeable=0, updated_at=? WHERE t212_ticker=?",
+                (datetime.now(timezone.utc).isoformat(), tk),
+            )
+            if cur.rowcount:
+                log.warning(f"Marked {tk} as untradeable: {reason}")
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def place_market_order(
     cfg: dict,
     t212_ticker: str,
@@ -1203,20 +1258,39 @@ def place_market_order(
         log.info(f"Skip {t212_ticker}: quantity {quantity} rounds to 0 at precision={precision}")
         return {"skipped": "quantity rounds to 0", "requested": quantity, "precision": precision}
 
-    payload = {"ticker": t212_ticker, "quantity": qty}
-    log.info(f"T212 order: {payload}  base={cfg['t212_base']}  (precision={precision})")
-    try:
-        r = requests.post(
-            f"{cfg['t212_base']}/api/v0/equity/orders/market",
-            headers=_t212_headers(cfg), json=payload, timeout=20,
-        )
-        if not r.ok:
-            body = r.text[:500]
-            log.warning(f"T212 order rejected {r.status_code}: {body}")
-            return {"error": f"{r.status_code}", "detail": body, "ticker": t212_ticker, "quantity": qty}
-        return r.json()
-    except Exception as exc:
-        return {"error": str(exc), "ticker": t212_ticker, "quantity": qty}
+    # Try the primary ticker first, then alternative forms on "not-owned" only.
+    tickers_tried: list[str] = []
+    last_error: dict = {}
+    for attempt_ticker in [t212_ticker, *_alternative_ticker_forms(t212_ticker)]:
+        tickers_tried.append(attempt_ticker)
+        payload = {"ticker": attempt_ticker, "quantity": qty}
+        log.info(f"T212 order: {payload}  base={cfg['t212_base']}  (precision={precision})")
+        try:
+            r = requests.post(
+                f"{cfg['t212_base']}/api/v0/equity/orders/market",
+                headers=_t212_headers(cfg), json=payload, timeout=20,
+            )
+        except Exception as exc:
+            last_error = {"error": str(exc), "ticker": attempt_ticker, "quantity": qty}
+            continue
+
+        if r.ok:
+            if attempt_ticker != t212_ticker:
+                log.info(f"Order succeeded with alternative ticker: {attempt_ticker} (primary {t212_ticker} failed)")
+            return {**r.json(), "ticker_used": attempt_ticker, "tickers_tried": tickers_tried}
+
+        body = r.text[:500]
+        log.warning(f"T212 order rejected {r.status_code} for {attempt_ticker}: {body}")
+        last_error = {"error": f"{r.status_code}", "detail": body, "ticker": attempt_ticker, "quantity": qty}
+
+        # Only retry alternatives when the failure mode is "not-owned" — for
+        # any other class of error (precision, insufficient funds, etc.) the
+        # alternative ticker won't help.
+        if r.status_code != 400 or "selling-equity-not-owned" not in body:
+            break
+
+    last_error["tickers_tried"] = tickers_tried
+    return last_error
 
 
 # ── Yahoo Finance ─────────────────────────────────────────────────────────────
@@ -1454,6 +1528,8 @@ def compute_snapshot() -> dict:
         group_row          = groups_db.get(canonical, {})
         group_label        = group_row.get("group_label", "unassigned")
         initial_weight_pct = float(group_row.get("initial_weight_pct") or 0)
+        # Default to tradeable=True when row missing (pre-2.6.2 DBs)
+        tradeable          = bool(group_row.get("tradeable", 1))
 
         avg_price_raw = float(pos.get("averagePrice") or 0)
         cur_price_raw = float(pos.get("currentPrice") or avg_price_raw)
@@ -1483,6 +1559,7 @@ def compute_snapshot() -> dict:
             "group":             group_label,
             "initial_weight_pct": initial_weight_pct,
             "quantity_precision": int(qty_prec),
+            "tradeable":         tradeable,
         })
 
     if not holdings:
@@ -1618,6 +1695,7 @@ def compute_snapshot() -> dict:
             "group_order":        GROUP_ORDER.get(h["group"], 9),
             "target_wt":          target_wt,
             "quantity_precision": h.get("quantity_precision", 2),
+            "tradeable":          h.get("tradeable", True),
         })
 
     cash = float(cash_data.get("free", 0.0))
@@ -1813,7 +1891,7 @@ def compute_snapshot() -> dict:
 
     return {
         "as_of":                as_of,
-        "collector_version":    "2.6.1",
+        "collector_version":    "2.6.2",
         "weight_mode":          cfg.get("weight_mode", "stored"),
         "portfolio_phase":      cfg.get("portfolio_phase", "Momentum-Chill"),
         "risk_score":           int(risk_score),
@@ -1905,12 +1983,12 @@ def _compute_rebalance(cfg, positions, mom_scores, momentum, vix, total_value, m
 
     if vix > vix_high:
         min_gap = 2
-        drifted = [p for p in positions if _int_gap(p) >= min_gap]
+        drifted = [p for p in positions if _int_gap(p) >= min_gap and p.get("tradeable", True)]
         if not drifted:
-            return False, f"VIX={vix:.1f} elevated — no holding ≥2 pts off target, holding", []
+            return False, f"VIX={vix:.1f} elevated — no tradeable holding ≥2 pts off target, holding", []
     else:
         min_gap = 1
-        drifted = [p for p in positions if _int_gap(p) >= min_gap]
+        drifted = [p for p in positions if _int_gap(p) >= min_gap and p.get("tradeable", True)]
 
     if not drifted:
         return False, "No holding is ≥1 integer point from target — no trade needed", []
@@ -2184,7 +2262,7 @@ def health():
     return {
         "status":           "ok",
         "utc":              datetime.now(timezone.utc).isoformat(),
-        "version":          "2.6.1",
+        "version":          "2.6.2",
         "t212_base":        opts.get("t212_base", "https://demo.trading212.com"),
         "demo_mode":        "demo" in opts.get("t212_base", "demo"),
         "phase":            opts.get("portfolio_phase", "Momentum-Max"),
@@ -2364,6 +2442,12 @@ def approve_rebalance(as_of: str, execute: bool = False):
             # Track cash freed only on confirmed-successful sells
             if "error" not in result and "skipped" not in result:
                 cash_freed += abs(float(action.get("delta_value", 0)))
+            elif "selling-equity-not-owned" in str(result.get("detail", "")):
+                # T212 persistently rejects orders for this position even after
+                # trying alternative ticker forms.  Auto-flag it so future trade
+                # plans exclude it; clears either when manually re-enabled or
+                # if the position is sold/closed elsewhere.
+                _mark_untradeable(action["t212_ticker"], "T212: selling-equity-not-owned")
             _record(action, result)
 
         # Wait briefly so cash actually appears in T212's free balance before
@@ -2600,6 +2684,42 @@ def set_group(ticker: str, body: dict = Body(default={})):
     return updated
 
 
+@app.post("/api/groups/{ticker}/tradeable")
+def set_tradeable(ticker: str, body: dict = Body(default={})):
+    """Manually mark an instrument as tradeable / untradeable.
+    Body: {"tradeable": true}  or  {"tradeable": false}
+
+    The collector auto-marks instruments untradeable after persistent
+    "selling-equity-not-owned" rejections.  Use this endpoint to:
+      • Re-enable an instrument once you've manually closed/replaced the
+        problem position in T212, or
+      • Pre-emptively exclude one you don't want the rebalancer to touch.
+    """
+    from urllib.parse import unquote
+    ticker = unquote(ticker)
+    raw = body.get("tradeable")
+    if raw is None or not isinstance(raw, bool):
+        raise HTTPException(400, 'Body must be {"tradeable": true|false}')
+
+    conn = get_db()
+    row  = conn.execute("SELECT 1 FROM instrument_groups WHERE t212_ticker=?", (ticker,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, f"Instrument '{ticker}' not found")
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "UPDATE instrument_groups SET tradeable=?, updated_at=? WHERE t212_ticker=?",
+        (1 if raw else 0, now, ticker),
+    )
+    conn.commit()
+    updated = dict(conn.execute(
+        "SELECT * FROM instrument_groups WHERE t212_ticker=?", (ticker,)
+    ).fetchone())
+    conn.close()
+    log.info(f"Tradeable set: {ticker} → {raw}")
+    return updated
+
+
 @app.get("/api/catalog/status")
 def catalog_status():
     """Catalog cache info."""
@@ -2742,7 +2862,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     # Always advertise the running collector version so HA sensors / dashboards
     # can confirm the add-on actually upgraded after a Supervisor update.
-    d["collector_version"] = "2.6.1"
+    d["collector_version"] = "2.6.2"
     for f in ["positions_json", "benchmarks_json", "drift_json", "momentum_json", "suggested_actions"]:
         key = f.replace("_json", "")
         d[key] = json.loads(d.pop(f) or ("[]" if f == "suggested_actions" else "{}"))
@@ -2784,7 +2904,7 @@ if __name__ == "__main__":
     # and ensures the /groups page works behind the ingress proxy.
     ingress_path = os.getenv("INGRESS_PATH", "")
     log.info(
-        f"Portfolio Collector v2.6.1 — phase={cfg['portfolio_phase']} — "
+        f"Portfolio Collector v2.6.2 — phase={cfg['portfolio_phase']} — "
         f"weight_mode={cfg['weight_mode']} — "
         f"DB: {DB_PATH} — T212: {cfg['t212_base']} — ingress={ingress_path or 'none'}"
     )
