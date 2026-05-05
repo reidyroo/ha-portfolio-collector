@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portfolio Collector — Home Assistant Add-on v2.6.0
+Portfolio Collector — Home Assistant Add-on v2.6.1
 ===================================================
 Monitors a Trading 212 portfolio, computing drift from target weights,
 scoring momentum, benchmarking against major indices, and suggesting
@@ -199,7 +199,7 @@ _T212_EXCHANGE_MAP: list[tuple[str, str]] = [
     ("_US_EQ",   ""),
 ]
 
-app = FastAPI(title="Portfolio Collector", version="2.6.0")
+app = FastAPI(title="Portfolio Collector", version="2.6.1")
 
 
 # ── Ticker utilities ──────────────────────────────────────────────────────────
@@ -389,7 +389,7 @@ def init_db():
             approved_at          TEXT,
             executed             INTEGER DEFAULT 0,
             executed_at          TEXT,
-            -- Generic JSON metadata bag for fields added in v2.6.0+:
+            -- Generic JSON metadata bag for fields added in v2.6.1+:
             -- weight_mode, portfolio_phase, risk_score, effective_risk,
             -- effective_risk_reason, drawdown_pct, dynamic_group_allocations
             metadata_json        TEXT
@@ -444,7 +444,7 @@ def init_db():
     except Exception:
         pass  # Column already exists — normal on fresh install or after first migration
 
-    # Migration: add metadata_json to existing DBs that predate 2.6.0
+    # Migration: add metadata_json to existing DBs that predate 2.6.1
     try:
         conn.execute("ALTER TABLE snapshots ADD COLUMN metadata_json TEXT")
         conn.commit()
@@ -452,7 +452,7 @@ def init_db():
     except Exception:
         pass
 
-    # Migration: add quantity_precision to instrument_catalog (predates 2.6.0).
+    # Migration: add quantity_precision to instrument_catalog (predates 2.6.1).
     # Existing rows default to 2; the next catalog refresh repopulates from T212.
     try:
         conn.execute("ALTER TABLE instrument_catalog ADD COLUMN quantity_precision INTEGER NOT NULL DEFAULT 2")
@@ -1038,6 +1038,7 @@ def load_config() -> dict:
         "cooldown_override_vix_threshold":      float(opts.get("cooldown_override_vix_threshold",
                                                               float(cfg_vix_high) + 5)),
         "cooldown_override_drawdown_threshold": float(opts.get("cooldown_override_drawdown_threshold", -15.0)),
+        "rebalance_settle_seconds":             float(opts.get("rebalance_settle_seconds", 5.0)),
         "max_cvar_pct":               cfg_max_cvar,
         "cost_rate_pct":              cfg_cost_rate,
         "group_allocations":          group_allocs,
@@ -1812,7 +1813,7 @@ def compute_snapshot() -> dict:
 
     return {
         "as_of":                as_of,
-        "collector_version":    "2.6.0",
+        "collector_version":    "2.6.1",
         "weight_mode":          cfg.get("weight_mode", "stored"),
         "portfolio_phase":      cfg.get("portfolio_phase", "Momentum-Chill"),
         "risk_score":           int(risk_score),
@@ -2183,7 +2184,7 @@ def health():
     return {
         "status":           "ok",
         "utc":              datetime.now(timezone.utc).isoformat(),
-        "version":          "2.6.0",
+        "version":          "2.6.1",
         "t212_base":        opts.get("t212_base", "https://demo.trading212.com"),
         "demo_mode":        "demo" in opts.get("t212_base", "demo"),
         "phase":            opts.get("portfolio_phase", "Momentum-Max"),
@@ -2295,9 +2296,23 @@ def trigger_collect():
 
 @app.post("/api/approve/{as_of}")
 def approve_rebalance(as_of: str, execute: bool = False):
-    """Approve the rebalance plan. Pass ?execute=true to submit orders to T212."""
+    """Approve the rebalance plan. Pass ?execute=true to submit orders to T212.
+
+    `as_of` accepts the special value "latest" to always target the most recent
+    snapshot in the DB.  Use that from automations / dashboard buttons so a
+    cached HA REST sensor `as_of` attribute can't cause the wrong (older)
+    snapshot to be acted upon.
+    """
     conn = get_db()
-    row  = conn.execute("SELECT * FROM snapshots WHERE as_of=?", (as_of,)).fetchone()
+    if as_of == "latest":
+        row = conn.execute(
+            "SELECT * FROM snapshots ORDER BY as_of DESC LIMIT 1"
+        ).fetchone()
+        if row:
+            as_of = row["as_of"]
+            log.info(f"approve_rebalance: 'latest' resolved to snapshot {as_of}")
+    else:
+        row = conn.execute("SELECT * FROM snapshots WHERE as_of=?", (as_of,)).fetchone()
     if not row:
         conn.close()
         raise HTTPException(404, f"Snapshot {as_of} not found")
@@ -2310,9 +2325,33 @@ def approve_rebalance(as_of: str, execute: bool = False):
     if execute:
         cfg     = load_config()
         actions = json.loads(row["suggested_actions"] or "[]")
+
+        # ── Two-phase execution ──────────────────────────────────────────────
+        # 1. SELLs first — track cash actually freed (not the requested amount,
+        #    only what T212 confirms succeeded).
+        # 2. Wait briefly for T212 to settle.
+        # 3. BUYs afterwards — skip any whose required cash exceeds the running
+        #    cash balance, instead of letting them fail with insufficient funds.
+        sells = [a for a in actions if a["action"] == "SELL"]
+        buys  = [a for a in actions if a["action"] == "BUY"]
+
         ok_count = 0
         fail_count = 0
-        for action in actions:
+        skipped_count = 0
+        cash_freed = 0.0
+
+        def _record(action, result):
+            nonlocal ok_count, fail_count, skipped_count
+            execution_results.append({"action": action, "result": result})
+            if "skipped" in result:
+                skipped_count += 1
+            elif "error" in result:
+                fail_count += 1
+            else:
+                ok_count += 1
+            log.info(f"Order: {action['action']} {action['delta_units']} {action['t212_ticker']} → {result}")
+
+        for action in sells:
             try:
                 result = place_market_order(
                     cfg,
@@ -2321,15 +2360,53 @@ def approve_rebalance(as_of: str, execute: bool = False):
                     precision=int(action.get("quantity_precision", 2)),
                 )
             except Exception as exc:
-                # Never let one failure abort the rest of the batch
                 result = {"error": "exception", "detail": str(exc)}
-            execution_results.append({"action": action, "result": result})
-            if "error" in result or "skipped" in result:
-                fail_count += 1
-            else:
-                ok_count += 1
-            log.info(f"Order: {action['action']} {action['delta_units']} {action['t212_ticker']} → {result}")
-        log.info(f"Batch complete: {ok_count} ok, {fail_count} failed/skipped of {len(actions)} total")
+            # Track cash freed only on confirmed-successful sells
+            if "error" not in result and "skipped" not in result:
+                cash_freed += abs(float(action.get("delta_value", 0)))
+            _record(action, result)
+
+        # Wait briefly so cash actually appears in T212's free balance before
+        # we try to spend it on the buy leg.
+        if sells and buys:
+            settle_sec = float(cfg.get("rebalance_settle_seconds", 5))
+            log.info(f"Sells phase complete: cash_freed=£{cash_freed:.2f}.  "
+                     f"Settling for {settle_sec}s before buy phase…")
+            time.sleep(settle_sec)
+
+        # Cash budget for buys = freed sells cash, plus a small slack for any
+        # pre-existing cash position (we don't have a precise live cash figure
+        # mid-rebalance, so use the snapshot's stored cash).
+        snapshot_cash = float(_row_to_dict(row).get("cash") or 0.0)
+        running_budget = cash_freed + snapshot_cash
+
+        for action in sorted(buys, key=lambda a: -abs(a.get("delta_value", 0))):
+            need = abs(float(action.get("delta_value", 0)))
+            if need > running_budget + 0.50:   # 50p slack for FX rounding
+                skip = {
+                    "skipped": "insufficient-cash-budget",
+                    "needed":  round(need, 2),
+                    "available": round(running_budget, 2),
+                }
+                _record(action, skip)
+                continue
+            try:
+                result = place_market_order(
+                    cfg,
+                    action["t212_ticker"],
+                    action["delta_units"],
+                    precision=int(action.get("quantity_precision", 2)),
+                )
+            except Exception as exc:
+                result = {"error": "exception", "detail": str(exc)}
+            if "error" not in result and "skipped" not in result:
+                running_budget -= need
+            _record(action, result)
+
+        log.info(
+            f"Batch complete: {ok_count} ok, {fail_count} failed, {skipped_count} skipped "
+            f"of {len(actions)} total  (cash_freed=£{cash_freed:.2f})"
+        )
         conn.execute("UPDATE snapshots SET executed=1, executed_at=? WHERE as_of=?",
                      (datetime.now(timezone.utc).isoformat(), as_of))
         conn.commit()
@@ -2665,7 +2742,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     # Always advertise the running collector version so HA sensors / dashboards
     # can confirm the add-on actually upgraded after a Supervisor update.
-    d["collector_version"] = "2.6.0"
+    d["collector_version"] = "2.6.1"
     for f in ["positions_json", "benchmarks_json", "drift_json", "momentum_json", "suggested_actions"]:
         key = f.replace("_json", "")
         d[key] = json.loads(d.pop(f) or ("[]" if f == "suggested_actions" else "{}"))
@@ -2707,7 +2784,7 @@ if __name__ == "__main__":
     # and ensures the /groups page works behind the ingress proxy.
     ingress_path = os.getenv("INGRESS_PATH", "")
     log.info(
-        f"Portfolio Collector v2.6.0 — phase={cfg['portfolio_phase']} — "
+        f"Portfolio Collector v2.6.1 — phase={cfg['portfolio_phase']} — "
         f"weight_mode={cfg['weight_mode']} — "
         f"DB: {DB_PATH} — T212: {cfg['t212_base']} — ingress={ingress_path or 'none'}"
     )

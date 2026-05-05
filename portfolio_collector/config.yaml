@@ -5,7 +5,7 @@ description: >
   scores momentum, benchmarks against MSCI World / S&P 500 / FTSE 100 / DOW / VIX,
   and suggests rebalance trades for manual approval. No holdings list required —
   T212 is the source of truth.
-version: "2.6.0"
+version: "2.6.1"
 slug: portfolio_collector
 init: false
 url: "https://github.com/YOUR_GITHUB_USERNAME/ha-portfolio-collector"
@@ -83,6 +83,11 @@ options:
   cooldown_override_vix_threshold: 30
   cooldown_override_drawdown_threshold: -15
 
+  # Seconds to wait between the SELL leg and BUY leg of an executed rebalance,
+  # so T212 can settle the freed cash before the buys hit.  5s is enough for
+  # demo accounts; live accounts may want longer.  Set to 0 to disable.
+  rebalance_settle_seconds: 5
+
   # Legacy boolean — kept for backwards compatibility with older configs.
   # If weight_mode is set, this is ignored.  If weight_mode is empty, then
   # use_group_weights=true behaves like weight_mode="equal_in_group".
@@ -121,6 +126,7 @@ schema:
   cooldown_override_enabled: bool?
   cooldown_override_vix_threshold: float?
   cooldown_override_drawdown_threshold: float?
+  rebalance_settle_seconds: float?
   max_cvar_pct: float
   cost_rate_pct: float
   max_snapshot_change_pct: int

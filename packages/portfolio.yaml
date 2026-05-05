@@ -244,18 +244,20 @@ rest_command:
     content_type: "application/json"
     timeout: 120
 
+  # Always target the most recent snapshot.  Using "latest" instead of a
+  # cached sensor as_of attribute avoids approving a stale plan when HA's REST
+  # sensor hasn't repolled since the most recent snapshot landed.
   approve_and_execute_rebalance:
     url: >
-      http://localhost:8000/api/approve/{{ state_attr('sensor.rebalance_signal', 'as_of')
-      }}?execute={{ (states('input_boolean.portfolio_live_mode') == 'on') | lower }}
+      http://localhost:8000/api/approve/latest?execute={{
+        (states('input_boolean.portfolio_live_mode') == 'on') | lower
+      }}
     method: POST
     content_type: "application/json"
-    timeout: 60
+    timeout: 120
 
   approve_rebalance_dry_run:
-    url: >
-      http://localhost:8000/api/approve/{{ state_attr('sensor.rebalance_signal', 'as_of')
-      }}?execute=false
+    url: "http://localhost:8000/api/approve/latest?execute=false"
     method: POST
     content_type: "application/json"
     timeout: 30

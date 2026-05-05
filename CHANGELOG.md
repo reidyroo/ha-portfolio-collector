@@ -4,6 +4,50 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [2.6.1] — 2026-05-05
+
+### Fixed — cascade failures during execution
+
+Three issues that caused approved rebalance plans to execute zero trades:
+
+1. **Stale-snapshot approvals.** The HA `approve_and_execute_rebalance` REST
+   command read `as_of` from `sensor.rebalance_signal`, which polls every
+   5 minutes. Approving via the dashboard could submit orders against an
+   older snapshot whose plan didn't reflect current targets. Endpoint now
+   accepts the special `as_of=latest` and the HA REST commands use it.
+2. **Buys cascading after failed sells.** When a sell rejected for any
+   reason, the cash it would have freed never appeared, so subsequent buys
+   in the same batch all rejected with "insufficient funds". Approval loop
+   now tracks confirmed-freed cash and **skips** any buys whose required
+   cash exceeds the running budget — with a clear `insufficient-cash-budget`
+   skip reason instead of a T212 400 noise wall.
+3. **Sell→buy settlement gap.** A new `rebalance_settle_seconds` option
+   (default 5s) inserts a wait between the sell phase and the buy phase
+   so T212 has time to register the freed cash before buy orders hit.
+
+### Changed
+- Approval loop split into two phases (all sells, settle, then all buys)
+  rather than mixed.  Buys are also reordered largest-first so a near-budget
+  shortfall affects the smallest trades, not the most material ones.
+- Final summary line now reports `ok / failed / skipped` counts and
+  `cash_freed` total for forensics.
+
+### Migration
+- HA REST commands `approve_and_execute_rebalance` and `approve_rebalance_dry_run`
+  in `packages/portfolio.yaml` switched to `/api/approve/latest`.  Re-deploy
+  the YAML via `sync_portfolio_files.sh` and restart HA Core.
+- New config option `rebalance_settle_seconds` defaults to 5; safe to leave alone.
+
+### Note on `selling-equity-not-owned` for VAGP / IGLS specifically
+This appears to be a T212 demo-account quirk where some seeded positions
+report a balance via `/api/v0/equity/portfolio` but T212's orders endpoint
+disagrees about ownership. v2.6.1 doesn't fix the demo issue itself — but
+the cash-tracking change ensures the rest of the trade plan still executes
+even when these specific instruments fail. To clear them, sell or close
+the affected positions manually in the T212 mobile/web app.
+
+---
+
 ## [2.6.0] — 2026-05-05
 
 ### Fixed — order rejections (precision + ticker mismatch)
