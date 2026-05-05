@@ -4,6 +4,46 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [2.6.0] — 2026-05-05
+
+### Fixed — order rejections (precision + ticker mismatch)
+
+T212 was rejecting two distinct classes of approved trade with HTTP 400:
+
+1. **`quantity-precision-mismatch`** — orders submitted with more decimal
+   places than the instrument allows (e.g. VWRL.L allows 4 decimals,
+   IJPN.L / SSAC.L allow 3, we were sending 6).
+2. **`selling-equity-not-owned`** — orders placed against the canonical
+   ticker form (e.g. `IGLS_EQ_XLON`) when T212's ISA-account portfolio API
+   returns the position under the compact form (e.g. `IGLSl_EQ`).
+
+### Added
+- **`quantity_precision` column** on `instrument_catalog`, populated from
+  T212's `quantityPrecision` field or inferred from `minTradeQuantity`
+  (e.g. 0.001 → 3, 0.01 → 2). Migration auto-adds the column to existing
+  DBs (default 2; refresh catalog to repopulate per-instrument values).
+- **`_quantity_precision_from_inst()`** helper to derive precision from
+  catalog rows.
+- **`_round_down_quantity()`** helper that floors signed quantities in
+  absolute terms — buys never overspend, sells never overshoot ownership.
+- Each `position` and trade `action` now carries `quantity_precision` and
+  `raw_t212_ticker` so trade sizing / order placement can apply the right
+  rounding and use the ticker T212 actually understands.
+- Approval loop is now **resilient**: one failed order no longer aborts the
+  whole batch. Each order's success/failure is logged with a final summary
+  (`Batch complete: N ok, M failed/skipped of T total`). Each result
+  carries the ticker + actual submitted quantity for forensics.
+- Orders that round to zero quantity at the catalog precision are
+  **skipped explicitly** with a log line, rather than submitted as 0 and
+  rejected.
+
+### Changed
+- `place_market_order()` signature now accepts a `precision` argument.
+  Re-rounds defensively before submission so a stale snapshot's action
+  can't bypass the catalog's current precision rule.
+
+---
+
 ## [2.5.2] — 2026-05-04
 
 ### Changed (docs only — no code change)

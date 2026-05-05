@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portfolio Collector — Home Assistant Add-on v2.5.2
+Portfolio Collector — Home Assistant Add-on v2.6.0
 ===================================================
 Monitors a Trading 212 portfolio, computing drift from target weights,
 scoring momentum, benchmarking against major indices, and suggesting
@@ -199,7 +199,7 @@ _T212_EXCHANGE_MAP: list[tuple[str, str]] = [
     ("_US_EQ",   ""),
 ]
 
-app = FastAPI(title="Portfolio Collector", version="2.5.2")
+app = FastAPI(title="Portfolio Collector", version="2.6.0")
 
 
 # ── Ticker utilities ──────────────────────────────────────────────────────────
@@ -238,6 +238,42 @@ def _t212_ticker_to_yahoo(t212_ticker: str) -> str:
     parts = t212_ticker.rsplit("_", 1)
     base  = parts[0] if len(parts) == 2 else t212_ticker
     return _base_symbol_from_ticker(base)
+
+
+def _quantity_precision_from_inst(inst: dict) -> int:
+    """Infer the allowed decimal precision for order quantity from a T212
+    catalog entry.
+
+    Priority:
+      1. Explicit `quantityPrecision` field (T212's preferred name)
+      2. Infer from `minTradeQuantity` (e.g. 0.001 → 3, 0.01 → 2, 1 → 0)
+      3. Default to 2 — safe baseline that works for most ETFs.
+    """
+    qp = inst.get("quantityPrecision")
+    if isinstance(qp, int) and qp >= 0:
+        return min(qp, 8)
+    mtq = inst.get("minTradeQuantity")
+    if isinstance(mtq, (int, float)) and mtq > 0:
+        import math
+        # 0.001 → 3; 0.01 → 2; 1 → 0; > 1 → 0
+        return max(0, min(8, -int(math.floor(math.log10(mtq))))) if mtq < 1 else 0
+    return 2
+
+
+def _round_down_quantity(qty: float, precision: int) -> float:
+    """Round a signed quantity DOWN in absolute terms to the given decimal places.
+
+    BUYS  (qty > 0): floor to precision  → never spend more than budgeted.
+    SELLS (qty < 0): floor abs, restore sign → never sell more than owned.
+
+    A trade rounded to exactly 0 should be skipped by the caller.
+    """
+    import math
+    if precision < 0:
+        precision = 0
+    factor = 10 ** precision
+    floored = math.floor(abs(qty) * factor) / factor
+    return math.copysign(floored, qty) if qty != 0 else 0.0
 
 
 def _validate_yahoo_symbol(yahoo_sym: str, canonical_ticker: str, exchange: str = "") -> str:
@@ -353,7 +389,7 @@ def init_db():
             approved_at          TEXT,
             executed             INTEGER DEFAULT 0,
             executed_at          TEXT,
-            -- Generic JSON metadata bag for fields added in v2.5.2+:
+            -- Generic JSON metadata bag for fields added in v2.6.0+:
             -- weight_mode, portfolio_phase, risk_score, effective_risk,
             -- effective_risk_reason, drawdown_pct, dynamic_group_allocations
             metadata_json        TEXT
@@ -366,6 +402,10 @@ def init_db():
             currency_code   TEXT NOT NULL DEFAULT 'GBP',
             exchange        TEXT,
             yahoo_symbol    TEXT,
+            -- Max decimal places allowed in order quantity (e.g. 3 → 0.001 step).
+            -- Captured from T212 catalog `quantityPrecision` or inferred from
+            -- `minTradeQuantity`.  Default 2 (0.01) is conservative.
+            quantity_precision INTEGER NOT NULL DEFAULT 2,
             fetched_at      TEXT NOT NULL
         );
 
@@ -404,11 +444,20 @@ def init_db():
     except Exception:
         pass  # Column already exists — normal on fresh install or after first migration
 
-    # Migration: add metadata_json to existing DBs that predate 2.5.2
+    # Migration: add metadata_json to existing DBs that predate 2.6.0
     try:
         conn.execute("ALTER TABLE snapshots ADD COLUMN metadata_json TEXT")
         conn.commit()
         log.info("DB migration: added metadata_json column to snapshots")
+    except Exception:
+        pass
+
+    # Migration: add quantity_precision to instrument_catalog (predates 2.6.0).
+    # Existing rows default to 2; the next catalog refresh repopulates from T212.
+    try:
+        conn.execute("ALTER TABLE instrument_catalog ADD COLUMN quantity_precision INTEGER NOT NULL DEFAULT 2")
+        conn.commit()
+        log.info("DB migration: added quantity_precision column — refresh catalog to populate")
     except Exception:
         pass
     conn.commit()
@@ -1107,20 +1156,23 @@ def fetch_instrument_catalog(cfg: dict, force: bool = False) -> dict:
         yahoo    = _derive_yahoo_symbol({
             "ticker": ticker, "exchange": exchange, **inst
         })
+        qty_prec = _quantity_precision_from_inst(inst)
         catalog[ticker] = {
-            "t212_ticker":  ticker,
-            "isin":         isin,
-            "name":         name,
-            "currency_code": currency,
-            "exchange":     exchange,
-            "yahoo_symbol": yahoo,
-            "fetched_at":   now,
+            "t212_ticker":        ticker,
+            "isin":               isin,
+            "name":               name,
+            "currency_code":      currency,
+            "exchange":           exchange,
+            "yahoo_symbol":       yahoo,
+            "quantity_precision": qty_prec,
+            "fetched_at":         now,
         }
         conn.execute(
             """INSERT OR REPLACE INTO instrument_catalog
-               (t212_ticker, isin, name, currency_code, exchange, yahoo_symbol, fetched_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (ticker, isin, name, currency, exchange, yahoo, now),
+               (t212_ticker, isin, name, currency_code, exchange, yahoo_symbol,
+                quantity_precision, fetched_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (ticker, isin, name, currency, exchange, yahoo, qty_prec, now),
         )
 
     conn.commit()
@@ -1129,12 +1181,29 @@ def fetch_instrument_catalog(cfg: dict, force: bool = False) -> dict:
     return catalog
 
 
-def place_market_order(cfg: dict, t212_ticker: str, quantity: float) -> dict:
-    """Place a market order. Positive = BUY, negative = SELL."""
+def place_market_order(
+    cfg: dict,
+    t212_ticker: str,
+    quantity: float,
+    precision: int = 2,
+) -> dict:
+    """Place a market order. Positive = BUY, negative = SELL.
+
+    `precision` is the max number of decimal places T212 allows for this
+    instrument's order quantity (from the catalog).  The quantity is
+    floored in absolute terms to that precision before submission, and the
+    order is skipped if the result rounds to zero.
+    """
     if not cfg["t212_token"]:
         return {"error": "No t212_token configured"}
-    payload = {"ticker": t212_ticker, "quantity": round(quantity, 6)}
-    log.info(f"T212 order: {payload}  base={cfg['t212_base']}")
+
+    qty = _round_down_quantity(float(quantity), precision)
+    if qty == 0.0:
+        log.info(f"Skip {t212_ticker}: quantity {quantity} rounds to 0 at precision={precision}")
+        return {"skipped": "quantity rounds to 0", "requested": quantity, "precision": precision}
+
+    payload = {"ticker": t212_ticker, "quantity": qty}
+    log.info(f"T212 order: {payload}  base={cfg['t212_base']}  (precision={precision})")
     try:
         r = requests.post(
             f"{cfg['t212_base']}/api/v0/equity/orders/market",
@@ -1143,10 +1212,10 @@ def place_market_order(cfg: dict, t212_ticker: str, quantity: float) -> dict:
         if not r.ok:
             body = r.text[:500]
             log.warning(f"T212 order rejected {r.status_code}: {body}")
-            return {"error": f"{r.status_code}", "detail": body}
+            return {"error": f"{r.status_code}", "detail": body, "ticker": t212_ticker, "quantity": qty}
         return r.json()
     except Exception as exc:
-        return {"error": str(exc)}
+        return {"error": str(exc), "ticker": t212_ticker, "quantity": qty}
 
 
 # ── Yahoo Finance ─────────────────────────────────────────────────────────────
@@ -1388,6 +1457,19 @@ def compute_snapshot() -> dict:
         avg_price_raw = float(pos.get("averagePrice") or 0)
         cur_price_raw = float(pos.get("currentPrice") or avg_price_raw)
 
+        # Quantity precision for orders.  Prefer the catalog value at canonical
+        # key; fall back to the raw ticker (which is what's actually returned by
+        # the portfolio API) so that ISA-compact-only catalog entries still work.
+        qty_prec = (
+            instrument.get("quantity_precision")
+            if instrument else None
+        )
+        if qty_prec is None:
+            raw_inst = catalog.get(raw_ticker, {})
+            qty_prec = raw_inst.get("quantity_precision")
+        if qty_prec is None:
+            qty_prec = 2  # safe default
+
         holdings.append({
             "yahoo_symbol":      yahoo_sym,
             "t212_ticker":       canonical,
@@ -1399,6 +1481,7 @@ def compute_snapshot() -> dict:
             "cur_price_raw":     cur_price_raw,   # in instrument currency (may be pence)
             "group":             group_label,
             "initial_weight_pct": initial_weight_pct,
+            "quantity_precision": int(qty_prec),
         })
 
     if not holdings:
@@ -1520,18 +1603,20 @@ def compute_snapshot() -> dict:
 
         total_value += market_value
         positions.append({
-            "symbol":        sym,
-            "t212_ticker":   h["t212_ticker"],
-            "display_name":  h["display_name"],
-            "quantity":      round(qty, 6),
-            "avg_price":     round(avg_price, 4),
-            "current_price": round(current_price, 4),
-            "market_value":  round(market_value, 2),
-            "cost_basis":    round(cost_basis, 2),
-            "pnl_pct":       round(pnl_pct, 2),
-            "group":         h["group"],
-            "group_order":   GROUP_ORDER.get(h["group"], 9),
-            "target_wt":     target_wt,
+            "symbol":             sym,
+            "t212_ticker":        h["t212_ticker"],
+            "raw_t212_ticker":    h.get("raw_t212_ticker", h["t212_ticker"]),
+            "display_name":       h["display_name"],
+            "quantity":           round(qty, 6),
+            "avg_price":          round(avg_price, 4),
+            "current_price":      round(current_price, 4),
+            "market_value":       round(market_value, 2),
+            "cost_basis":         round(cost_basis, 2),
+            "pnl_pct":            round(pnl_pct, 2),
+            "group":              h["group"],
+            "group_order":        GROUP_ORDER.get(h["group"], 9),
+            "target_wt":          target_wt,
+            "quantity_precision": h.get("quantity_precision", 2),
         })
 
     cash = float(cash_data.get("free", 0.0))
@@ -1727,7 +1812,7 @@ def compute_snapshot() -> dict:
 
     return {
         "as_of":                as_of,
-        "collector_version":    "2.5.2",
+        "collector_version":    "2.6.0",
         "weight_mode":          cfg.get("weight_mode", "stored"),
         "portfolio_phase":      cfg.get("portfolio_phase", "Momentum-Chill"),
         "risk_score":           int(risk_score),
@@ -1847,16 +1932,24 @@ def _compute_rebalance(cfg, positions, mom_scores, momentum, vix, total_value, m
 
     def _make_action(p, delta_val, balancing=False):
         sym         = p["symbol"]
-        delta_units = delta_val / p["current_price"] if p["current_price"] else 0.0
+        precision   = int(p.get("quantity_precision", 2))
+        raw_units   = delta_val / p["current_price"] if p["current_price"] else 0.0
+        # Round DOWN in absolute terms so we never spend more than budgeted (BUY)
+        # or sell more than owned (SELL).
+        delta_units = _round_down_quantity(raw_units, precision)
         return {
             "symbol":             sym,
-            "t212_ticker":        p["t212_ticker"],
+            # Use the ticker T212's portfolio API actually returned for this
+            # position.  That's the form the orders endpoint will recognise;
+            # the canonical/normalised form may not match for ISA accounts.
+            "t212_ticker":        p.get("raw_t212_ticker", p["t212_ticker"]),
             "action":             "BUY" if delta_val > 0 else "SELL",
             "current_wt":         p["actual_wt"],
             "target_wt":          round(adj_weights[sym], 2),
             "original_target_wt": int(cfg["target_weights"][sym]),
             "delta_value":        round(delta_val, 2),
-            "delta_units":        round(delta_units, 6),
+            "delta_units":        delta_units,
+            "quantity_precision": precision,
             "current_value":      round(p["market_value"], 2),
             "target_value":       round(total_value * adj_weights[sym] / 100, 2),
             "drift_rel":          p["drift_rel"],
@@ -2090,7 +2183,7 @@ def health():
     return {
         "status":           "ok",
         "utc":              datetime.now(timezone.utc).isoformat(),
-        "version":          "2.5.2",
+        "version":          "2.6.0",
         "t212_base":        opts.get("t212_base", "https://demo.trading212.com"),
         "demo_mode":        "demo" in opts.get("t212_base", "demo"),
         "phase":            opts.get("portfolio_phase", "Momentum-Max"),
@@ -2217,10 +2310,26 @@ def approve_rebalance(as_of: str, execute: bool = False):
     if execute:
         cfg     = load_config()
         actions = json.loads(row["suggested_actions"] or "[]")
+        ok_count = 0
+        fail_count = 0
         for action in actions:
-            result = place_market_order(cfg, action["t212_ticker"], action["delta_units"])
+            try:
+                result = place_market_order(
+                    cfg,
+                    action["t212_ticker"],
+                    action["delta_units"],
+                    precision=int(action.get("quantity_precision", 2)),
+                )
+            except Exception as exc:
+                # Never let one failure abort the rest of the batch
+                result = {"error": "exception", "detail": str(exc)}
             execution_results.append({"action": action, "result": result})
+            if "error" in result or "skipped" in result:
+                fail_count += 1
+            else:
+                ok_count += 1
             log.info(f"Order: {action['action']} {action['delta_units']} {action['t212_ticker']} → {result}")
+        log.info(f"Batch complete: {ok_count} ok, {fail_count} failed/skipped of {len(actions)} total")
         conn.execute("UPDATE snapshots SET executed=1, executed_at=? WHERE as_of=?",
                      (datetime.now(timezone.utc).isoformat(), as_of))
         conn.commit()
@@ -2556,7 +2665,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     # Always advertise the running collector version so HA sensors / dashboards
     # can confirm the add-on actually upgraded after a Supervisor update.
-    d["collector_version"] = "2.5.2"
+    d["collector_version"] = "2.6.0"
     for f in ["positions_json", "benchmarks_json", "drift_json", "momentum_json", "suggested_actions"]:
         key = f.replace("_json", "")
         d[key] = json.loads(d.pop(f) or ("[]" if f == "suggested_actions" else "{}"))
@@ -2598,7 +2707,7 @@ if __name__ == "__main__":
     # and ensures the /groups page works behind the ingress proxy.
     ingress_path = os.getenv("INGRESS_PATH", "")
     log.info(
-        f"Portfolio Collector v2.5.2 — phase={cfg['portfolio_phase']} — "
+        f"Portfolio Collector v2.6.0 — phase={cfg['portfolio_phase']} — "
         f"weight_mode={cfg['weight_mode']} — "
         f"DB: {DB_PATH} — T212: {cfg['t212_base']} — ingress={ingress_path or 'none'}"
     )
