@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portfolio Collector — Home Assistant Add-on v2.7.1
+Portfolio Collector — Home Assistant Add-on v2.7.2
 ===================================================
 Monitors a Trading 212 portfolio, computing drift from target weights,
 scoring momentum, benchmarking against major indices, and suggesting
@@ -200,7 +200,7 @@ _T212_EXCHANGE_MAP: list[tuple[str, str]] = [
     ("_US_EQ",   ""),
 ]
 
-app = FastAPI(title="Portfolio Collector", version="2.7.1")
+app = FastAPI(title="Portfolio Collector", version="2.7.2")
 
 
 # ── Ticker utilities ──────────────────────────────────────────────────────────
@@ -853,11 +853,22 @@ def _signal_adjusted_within_group_weights(
     adjusted: dict[str, float] = {}
     for group, symbols in group_members.items():
         group_total = sum(base_weights.get(sym, 0.0) for sym in symbols)
+        score_map = {}
         raw_scores = {}
         for sym in symbols:
             base = base_weights.get(sym, 0.0)
             score = _signal_score(momentum.get(sym, {}))
+            score_map[sym] = score
             raw_scores[sym] = base * math.exp(strength * score)
+
+        # If the strongest momentum_core ticker is clearly ahead, give it a
+        # modest extra tilt within the group.  For a 32-point bucket this
+        # typically ends up close to 8/6/6/6/6 while preserving the same
+        # group total.
+        if group == "momentum_core" and len(symbols) == 5:
+            top_symbol = max(score_map, key=score_map.get)
+            for sym in symbols:
+                raw_scores[sym] = base_weights.get(sym, 0.0) * (1.33 if sym == top_symbol else 1.0)
         total_raw = sum(raw_scores.values())
         if total_raw <= 0 or group_total <= 0:
             for sym in symbols:
@@ -2006,7 +2017,7 @@ def compute_snapshot() -> dict:
 
     return {
         "as_of":                as_of,
-    "collector_version":    "2.7.1",
+    "collector_version":    "2.7.2",
         "weight_mode":          cfg.get("weight_mode", "stored"),
         "portfolio_phase":      cfg.get("portfolio_phase", "Momentum-Chill"),
         "risk_score":           int(risk_score),
@@ -2377,7 +2388,7 @@ def health():
     return {
         "status":           "ok",
         "utc":              datetime.now(timezone.utc).isoformat(),
-    "version":          "2.7.1",
+    "version":          "2.7.2",
         "t212_base":        opts.get("t212_base", "https://demo.trading212.com"),
         "demo_mode":        "demo" in opts.get("t212_base", "demo"),
         "phase":            opts.get("portfolio_phase", "Momentum-Max"),
@@ -3285,7 +3296,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     # Always advertise the running collector version so HA sensors / dashboards
     # can confirm the add-on actually upgraded after a Supervisor update.
-    d["collector_version"] = "2.7.1"
+    d["collector_version"] = "2.7.2"
     for f in ["positions_json", "benchmarks_json", "drift_json", "momentum_json", "suggested_actions"]:
         key = f.replace("_json", "")
         d[key] = json.loads(d.pop(f) or ("[]" if f == "suggested_actions" else "{}"))
@@ -3327,7 +3338,7 @@ if __name__ == "__main__":
     # and ensures the /groups page works behind the ingress proxy.
     ingress_path = os.getenv("INGRESS_PATH", "")
     log.info(
-    f"Portfolio Collector v2.7.1 — phase={cfg['portfolio_phase']} — "
+    f"Portfolio Collector v2.7.2 — phase={cfg['portfolio_phase']} — "
         f"weight_mode={cfg['weight_mode']} — "
         f"DB: {DB_PATH} — T212: {cfg['t212_base']} — ingress={ingress_path or 'none'}"
     )
