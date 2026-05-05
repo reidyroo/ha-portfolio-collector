@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portfolio Collector — Home Assistant Add-on v2.6.2
+Portfolio Collector — Home Assistant Add-on v2.6.3
 ===================================================
 Monitors a Trading 212 portfolio, computing drift from target weights,
 scoring momentum, benchmarking against major indices, and suggesting
@@ -199,7 +199,7 @@ _T212_EXCHANGE_MAP: list[tuple[str, str]] = [
     ("_US_EQ",   ""),
 ]
 
-app = FastAPI(title="Portfolio Collector", version="2.6.2")
+app = FastAPI(title="Portfolio Collector", version="2.6.3")
 
 
 # ── Ticker utilities ──────────────────────────────────────────────────────────
@@ -389,7 +389,7 @@ def init_db():
             approved_at          TEXT,
             executed             INTEGER DEFAULT 0,
             executed_at          TEXT,
-            -- Generic JSON metadata bag for fields added in v2.6.2+:
+            -- Generic JSON metadata bag for fields added in v2.6.3+:
             -- weight_mode, portfolio_phase, risk_score, effective_risk,
             -- effective_risk_reason, drawdown_pct, dynamic_group_allocations
             metadata_json        TEXT
@@ -450,7 +450,7 @@ def init_db():
     except Exception:
         pass  # Column already exists — normal on fresh install or after first migration
 
-    # Migration: add metadata_json to existing DBs that predate 2.6.2
+    # Migration: add metadata_json to existing DBs that predate 2.6.3
     try:
         conn.execute("ALTER TABLE snapshots ADD COLUMN metadata_json TEXT")
         conn.commit()
@@ -458,7 +458,7 @@ def init_db():
     except Exception:
         pass
 
-    # Migration: add quantity_precision to instrument_catalog (predates 2.6.2).
+    # Migration: add quantity_precision to instrument_catalog (predates 2.6.3).
     # Existing rows default to 2; the next catalog refresh repopulates from T212.
     try:
         conn.execute("ALTER TABLE instrument_catalog ADD COLUMN quantity_precision INTEGER NOT NULL DEFAULT 2")
@@ -467,7 +467,7 @@ def init_db():
     except Exception:
         pass
 
-    # Migration: add tradeable flag to instrument_groups (predates 2.6.2)
+    # Migration: add tradeable flag to instrument_groups (predates 2.6.3)
     try:
         conn.execute("ALTER TABLE instrument_groups ADD COLUMN tradeable INTEGER NOT NULL DEFAULT 1")
         conn.commit()
@@ -1528,7 +1528,7 @@ def compute_snapshot() -> dict:
         group_row          = groups_db.get(canonical, {})
         group_label        = group_row.get("group_label", "unassigned")
         initial_weight_pct = float(group_row.get("initial_weight_pct") or 0)
-        # Default to tradeable=True when row missing (pre-2.6.2 DBs)
+        # Default to tradeable=True when row missing (pre-2.6.3 DBs)
         tradeable          = bool(group_row.get("tradeable", 1))
 
         avg_price_raw = float(pos.get("averagePrice") or 0)
@@ -1891,7 +1891,7 @@ def compute_snapshot() -> dict:
 
     return {
         "as_of":                as_of,
-        "collector_version":    "2.6.2",
+        "collector_version":    "2.6.3",
         "weight_mode":          cfg.get("weight_mode", "stored"),
         "portfolio_phase":      cfg.get("portfolio_phase", "Momentum-Chill"),
         "risk_score":           int(risk_score),
@@ -2262,7 +2262,7 @@ def health():
     return {
         "status":           "ok",
         "utc":              datetime.now(timezone.utc).isoformat(),
-        "version":          "2.6.2",
+        "version":          "2.6.3",
         "t212_base":        opts.get("t212_base", "https://demo.trading212.com"),
         "demo_mode":        "demo" in opts.get("t212_base", "demo"),
         "phase":            opts.get("portfolio_phase", "Momentum-Max"),
@@ -2684,6 +2684,134 @@ def set_group(ticker: str, body: dict = Body(default={})):
     return updated
 
 
+@app.get("/api/t212/positions")
+def t212_raw_positions():
+    """Pass-through of T212's raw `/api/v0/equity/portfolio` response.
+    Use to compare against what's stored in `instrument_groups` if the
+    rebalancer is suggesting trades T212 can't actually execute.
+    """
+    cfg = load_config()
+    if not cfg["t212_token"]:
+        raise HTTPException(400, "No t212_token configured")
+    try:
+        r = requests.get(
+            f"{cfg['t212_base']}/api/v0/equity/portfolio",
+            headers=_t212_headers(cfg), timeout=20,
+        )
+        r.raise_for_status()
+    except Exception as exc:
+        raise HTTPException(502, f"T212 portfolio fetch failed: {exc}")
+    return {
+        "count":     len(r.json()),
+        "positions": r.json(),
+    }
+
+
+@app.get("/api/t212/pies")
+def t212_pies():
+    """List all auto-invest pies on the T212 account.
+
+    If a position appears in `/api/t212/positions` but the orders endpoint
+    rejects it with `selling-equity-not-owned`, the position is likely held
+    inside a pie.  T212 doesn't allow direct orders on pie-held instruments
+    — you need to manage them through the pie itself (reduce the pie's value,
+    duplicate / withdraw it, or sell via the T212 mobile app).
+    """
+    cfg = load_config()
+    if not cfg["t212_token"]:
+        raise HTTPException(400, "No t212_token configured")
+    try:
+        r = requests.get(
+            f"{cfg['t212_base']}/api/v0/equity/pies",
+            headers=_t212_headers(cfg), timeout=20,
+        )
+        r.raise_for_status()
+    except Exception as exc:
+        raise HTTPException(502, f"T212 pies fetch failed: {exc}")
+    pies = r.json()
+    return {"count": len(pies), "pies": pies}
+
+
+@app.post("/api/test-order")
+def test_order(body: dict = Body(default={})):
+    """Manual single-order endpoint for diagnostics.  Bypasses the rebalance
+    pipeline entirely — useful for verifying T212 connectivity and isolating
+    "can this specific instrument be traded at all?" questions.
+
+    Body:
+      {
+        "ticker":    "IGLSl_EQ",          // T212 ticker (compact or canonical)
+        "value_gbp": 50.0,                // £ value of trade (price × qty)
+        "action":    "SELL"               // "BUY" or "SELL"
+      }
+
+    The endpoint:
+      1. Looks up current price from the latest snapshot's positions.
+      2. Computes quantity = value_gbp / price, signed by action.
+      3. Rounds to the catalog's quantity_precision.
+      4. Submits via place_market_order (which does its own alt-ticker retry).
+      5. Returns full T212 response and the actual quantity submitted.
+
+    DOES NOT update any DB state, DOES NOT consume the cooldown override flag,
+    DOES NOT mark instruments untradeable.  Pure diagnostic.
+    """
+    ticker    = str(body.get("ticker", "")).strip()
+    value_gbp = float(body.get("value_gbp", 0))
+    action    = str(body.get("action", "")).strip().upper()
+    if not ticker or value_gbp <= 0 or action not in ("BUY", "SELL"):
+        raise HTTPException(400, 'Body must be {"ticker":"...", "value_gbp": <num>, "action":"BUY"|"SELL"}')
+
+    # Find current price from the latest snapshot's positions
+    conn = get_db()
+    row  = conn.execute(
+        "SELECT positions_json FROM snapshots ORDER BY as_of DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(503, "No snapshot available — run /api/collect first to build position price data")
+    positions = json.loads(row["positions_json"] or "[]")
+    pos = next(
+        (p for p in positions
+         if p["t212_ticker"] == ticker
+         or p.get("raw_t212_ticker") == ticker
+         or p["symbol"] == ticker),
+        None,
+    )
+    if not pos:
+        raise HTTPException(
+            404,
+            f"Ticker '{ticker}' not in latest snapshot positions. "
+            f"Use compact ticker (e.g. IGLSl_EQ) or yahoo symbol (e.g. IGLS.L)."
+        )
+    price = float(pos["current_price"])
+    if price <= 0:
+        raise HTTPException(503, f"Latest snapshot has price=0 for {ticker} — try running another snapshot")
+
+    raw_qty = value_gbp / price
+    if action == "SELL":
+        raw_qty = -raw_qty
+    precision = int(pos.get("quantity_precision", 2))
+
+    cfg = load_config()
+    log.info(
+        f"TEST ORDER: {action} £{value_gbp} of {ticker}  "
+        f"price=£{price:.4f}  raw_qty={raw_qty:.6f}  precision={precision}"
+    )
+    result = place_market_order(cfg, pos.get("raw_t212_ticker", ticker), raw_qty, precision)
+    return {
+        "request": {
+            "ticker":          ticker,
+            "value_gbp":       value_gbp,
+            "action":          action,
+            "current_price":   price,
+            "raw_quantity":    round(raw_qty, 6),
+            "precision":       precision,
+            "submitted_ticker": pos.get("raw_t212_ticker", ticker),
+        },
+        "result": result,
+    }
+
+
 @app.post("/api/groups/{ticker}/tradeable")
 def set_tradeable(ticker: str, body: dict = Body(default={})):
     """Manually mark an instrument as tradeable / untradeable.
@@ -2862,7 +2990,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     # Always advertise the running collector version so HA sensors / dashboards
     # can confirm the add-on actually upgraded after a Supervisor update.
-    d["collector_version"] = "2.6.2"
+    d["collector_version"] = "2.6.3"
     for f in ["positions_json", "benchmarks_json", "drift_json", "momentum_json", "suggested_actions"]:
         key = f.replace("_json", "")
         d[key] = json.loads(d.pop(f) or ("[]" if f == "suggested_actions" else "{}"))
@@ -2904,7 +3032,7 @@ if __name__ == "__main__":
     # and ensures the /groups page works behind the ingress proxy.
     ingress_path = os.getenv("INGRESS_PATH", "")
     log.info(
-        f"Portfolio Collector v2.6.2 — phase={cfg['portfolio_phase']} — "
+        f"Portfolio Collector v2.6.3 — phase={cfg['portfolio_phase']} — "
         f"weight_mode={cfg['weight_mode']} — "
         f"DB: {DB_PATH} — T212: {cfg['t212_base']} — ingress={ingress_path or 'none'}"
     )

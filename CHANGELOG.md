@@ -4,6 +4,25 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [2.6.3] — 2026-05-05
+
+### Added — diagnostic endpoints for the T212 pie / not-owned mystery
+- `GET /api/t212/positions` — pass-through of T212's raw portfolio response.
+  Compare against `instrument_groups` to spot positions T212 reports with
+  one ticker form vs. another.
+- `GET /api/t212/pies` — list all auto-invest pies on the account. If a
+  position appears in `/api/t212/positions` but rejects orders with
+  "selling-equity-not-owned", it's almost certainly inside a pie. T212
+  doesn't allow direct orders on pie-held instruments — manage via the
+  pie itself or the T212 mobile app.
+- `POST /api/test-order` — single-order diagnostic, no rebalance pipeline.
+  Body: `{"ticker": "IGLSl_EQ", "value_gbp": 50, "action": "SELL"}`.
+  Looks up price from latest snapshot, computes precision-rounded qty,
+  submits one order, returns the full request + T212 response. Does NOT
+  touch DB state, cooldown, untradeable flag — pure isolation test.
+
+---
+
 ## [2.6.2] — 2026-05-05
 
 ### Added — untradeable detection + auto-quarantine
