@@ -26,6 +26,11 @@ views:
 
           ⚠ **Cooldown override:** {{ state_attr('sensor.portfolio_value', 'cooldown_override_reason') }}
           {% endif %}
+          {% if state_attr('sensor.portfolio_value', 'pie_detected') %}
+
+          🥧 **Auto-invest pie active** (id {{ state_attr('sensor.portfolio_value', 'pie_id') }}) — direct orders disabled.
+          Use **Push Targets to Pie** on the Rebalance tab to apply the computed targets.
+          {% endif %}
 
       # ── Header: value / return / cash / VIX ──────────────────────────────
       - type: glance
@@ -429,6 +434,43 @@ views:
           service: rest_command.reset_rebalance_cooldown
           confirmation:
             text: Clear the cooldown timer? Use after a failed execution to allow an immediate retry.
+
+      # ── Pie controls (only meaningful when an auto-invest pie is active) ──
+      - type: conditional
+        conditions:
+          - entity: sensor.portfolio_value
+            attribute: pie_detected
+            state: true
+        card:
+          type: vertical-stack
+          cards:
+            - type: markdown
+              content: |
+                ### 🥧 Pie Execution
+                All your positions are inside T212 pie **{{ state_attr('sensor.portfolio_value', 'pie_id') }}**.
+                Direct market orders don't work for pie holdings.  Use the buttons below
+                to update the pie's *target shares* — T212 then rebalances the pie
+                gradually toward those shares on its own auto-invest schedule.
+
+            - type: horizontal-stack
+              cards:
+                - type: button
+                  name: Preview Pie Targets
+                  icon: mdi:eye-outline
+                  tap_action:
+                    action: call-service
+                    service: rest_command.preview_pie_targets
+                - type: button
+                  name: Push Targets to Pie
+                  icon: mdi:upload-outline
+                  tap_action:
+                    action: call-service
+                    service: rest_command.push_targets_to_pie
+                    confirmation:
+                      text: >
+                        Update the pie's target shares to match the latest snapshot's
+                        targets?  T212 will rebalance the pie toward these shares
+                        gradually on its own schedule.  Continue?
 
 
   # ═══════════════════════════════════

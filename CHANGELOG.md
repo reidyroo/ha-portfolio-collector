@@ -4,6 +4,55 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [2.7.0] — 2026-05-05
+
+### Added — pie-aware execution
+
+Diagnostic endpoints in v2.6.3 confirmed that some users hold their entire
+portfolio inside a T212 auto-invest pie.  T212 doesn't allow direct market
+orders against pie-held instruments — every order rejected with
+`selling-equity-not-owned`.  v2.7.0 detects this and switches execution mode.
+
+- **Pie auto-detection** on every snapshot via `GET /api/v0/equity/pies`.
+  Snapshot metadata exposes `pie_detected`, `pie_id`, and `execution_mode`
+  (`"pie"` or `"direct"`).
+- **`POST /api/push-to-pie`** — updates the pie's `instrumentShares` to match
+  the latest snapshot's target weights.  T212 then rebalances the pie
+  gradually on its own auto-invest schedule.  Body accepts `pie_id` (override
+  auto-detect) and `preview` (compute shares without submitting).
+- **`GET /api/t212/pie/{pie_id}`** — fetch full pie state for inspection.
+- **Direct-order safeguard.** When a pie is detected and
+  `force_direct_orders_when_pie: false` (default), `POST /api/approve/...`
+  with `execute=true` returns a clear "use push-to-pie instead" message
+  rather than firing direct orders that will all fail. Set
+  `force_direct_orders_when_pie: true` to override (rarely useful).
+- **Dashboard pie banner** on the Overview view shows pie id when active.
+- **Rebalance view** gets a conditional Pie Execution card with **Preview
+  Pie Targets** and **Push Targets to Pie** buttons.
+- New REST commands `push_targets_to_pie` and `preview_pie_targets` in the
+  package YAML.
+
+### Changed
+- `cfg["execution_mode"]` and `cfg["pie_id"]` available downstream for any
+  future pie-specific logic.
+
+### Migration
+Re-deploy the YAML files via `sync_portfolio_files.sh` and rebuild the
+add-on.  No DB schema changes.  The first snapshot after upgrade will
+populate `pie_detected`/`pie_id` automatically; the dashboard banner
+appears once the REST sensor repolls (within 5 minutes).
+
+### Note on pie-only execution
+`Push Targets to Pie` updates the pie's *target shares*, which is T212's own
+mechanism for "this is what I want the pie to look like".  T212 then
+rebalances incrementally on its auto-invest schedule (typically weekly /
+monthly depending on pie config).  If you want immediate rebalancing,
+either change the pie schedule to "On Demand" in the T212 app, or contribute
+fresh cash to the pie which forces an immediate purchase across the new
+shares.
+
+---
+
 ## [2.6.3] — 2026-05-05
 
 ### Added — diagnostic endpoints for the T212 pie / not-owned mystery

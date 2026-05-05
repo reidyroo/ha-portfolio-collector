@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portfolio Collector — Home Assistant Add-on v2.6.3
+Portfolio Collector — Home Assistant Add-on v2.7.0
 ===================================================
 Monitors a Trading 212 portfolio, computing drift from target weights,
 scoring momentum, benchmarking against major indices, and suggesting
@@ -199,7 +199,7 @@ _T212_EXCHANGE_MAP: list[tuple[str, str]] = [
     ("_US_EQ",   ""),
 ]
 
-app = FastAPI(title="Portfolio Collector", version="2.6.3")
+app = FastAPI(title="Portfolio Collector", version="2.7.0")
 
 
 # ── Ticker utilities ──────────────────────────────────────────────────────────
@@ -389,7 +389,7 @@ def init_db():
             approved_at          TEXT,
             executed             INTEGER DEFAULT 0,
             executed_at          TEXT,
-            -- Generic JSON metadata bag for fields added in v2.6.3+:
+            -- Generic JSON metadata bag for fields added in v2.7.0+:
             -- weight_mode, portfolio_phase, risk_score, effective_risk,
             -- effective_risk_reason, drawdown_pct, dynamic_group_allocations
             metadata_json        TEXT
@@ -450,7 +450,7 @@ def init_db():
     except Exception:
         pass  # Column already exists — normal on fresh install or after first migration
 
-    # Migration: add metadata_json to existing DBs that predate 2.6.3
+    # Migration: add metadata_json to existing DBs that predate 2.7.0
     try:
         conn.execute("ALTER TABLE snapshots ADD COLUMN metadata_json TEXT")
         conn.commit()
@@ -458,7 +458,7 @@ def init_db():
     except Exception:
         pass
 
-    # Migration: add quantity_precision to instrument_catalog (predates 2.6.3).
+    # Migration: add quantity_precision to instrument_catalog (predates 2.7.0).
     # Existing rows default to 2; the next catalog refresh repopulates from T212.
     try:
         conn.execute("ALTER TABLE instrument_catalog ADD COLUMN quantity_precision INTEGER NOT NULL DEFAULT 2")
@@ -467,7 +467,7 @@ def init_db():
     except Exception:
         pass
 
-    # Migration: add tradeable flag to instrument_groups (predates 2.6.3)
+    # Migration: add tradeable flag to instrument_groups (predates 2.7.0)
     try:
         conn.execute("ALTER TABLE instrument_groups ADD COLUMN tradeable INTEGER NOT NULL DEFAULT 1")
         conn.commit()
@@ -1054,6 +1054,7 @@ def load_config() -> dict:
                                                               float(cfg_vix_high) + 5)),
         "cooldown_override_drawdown_threshold": float(opts.get("cooldown_override_drawdown_threshold", -15.0)),
         "rebalance_settle_seconds":             float(opts.get("rebalance_settle_seconds", 5.0)),
+        "force_direct_orders_when_pie":         bool(opts.get("force_direct_orders_when_pie", False)),
         "max_cvar_pct":               cfg_max_cvar,
         "cost_rate_pct":              cfg_cost_rate,
         "group_allocations":          group_allocs,
@@ -1528,7 +1529,7 @@ def compute_snapshot() -> dict:
         group_row          = groups_db.get(canonical, {})
         group_label        = group_row.get("group_label", "unassigned")
         initial_weight_pct = float(group_row.get("initial_weight_pct") or 0)
-        # Default to tradeable=True when row missing (pre-2.6.3 DBs)
+        # Default to tradeable=True when row missing (pre-2.7.0 DBs)
         tradeable          = bool(group_row.get("tradeable", 1))
 
         avg_price_raw = float(pos.get("averagePrice") or 0)
@@ -1846,6 +1847,13 @@ def compute_snapshot() -> dict:
     pk_val = float(pk["peak"]) if pk and pk["peak"] else total_value
     drawdown_now = round((total_value - pk_val) / pk_val * 100 if pk_val > 0 else 0.0, 2)
 
+    # Pie detection — used by approval/execution to switch to push-to-pie mode.
+    # Best-effort: if T212 is unreachable, leaves pie_detected=False and the
+    # rebalancer falls back to direct-order behaviour as before.
+    active_pie    = _detect_active_pie(cfg)
+    pie_detected  = active_pie is not None
+    pie_id        = int(active_pie["id"]) if active_pie else None
+
     metadata = {
         "weight_mode":           cfg.get("weight_mode", "stored"),
         "portfolio_phase":       cfg.get("portfolio_phase", "Momentum-Chill"),
@@ -1858,6 +1866,9 @@ def compute_snapshot() -> dict:
         "dynamic_group_allocations": (
             {g: round(v, 1) for g, v in interp_allocs.items()} if interp_allocs else None
         ),
+        "pie_detected":          pie_detected,
+        "pie_id":                pie_id,
+        "execution_mode":        "pie" if pie_detected else "direct",
     }
 
     conn.execute("""
@@ -1891,7 +1902,7 @@ def compute_snapshot() -> dict:
 
     return {
         "as_of":                as_of,
-        "collector_version":    "2.6.3",
+        "collector_version":    "2.7.0",
         "weight_mode":          cfg.get("weight_mode", "stored"),
         "portfolio_phase":      cfg.get("portfolio_phase", "Momentum-Chill"),
         "risk_score":           int(risk_score),
@@ -2262,7 +2273,7 @@ def health():
     return {
         "status":           "ok",
         "utc":              datetime.now(timezone.utc).isoformat(),
-        "version":          "2.6.3",
+        "version":          "2.7.0",
         "t212_base":        opts.get("t212_base", "https://demo.trading212.com"),
         "demo_mode":        "demo" in opts.get("t212_base", "demo"),
         "phase":            opts.get("portfolio_phase", "Momentum-Max"),
@@ -2402,6 +2413,34 @@ def approve_rebalance(as_of: str, execute: bool = False):
     execution_results = []
     if execute:
         cfg     = load_config()
+
+        # ── Pie detection short-circuit ──────────────────────────────────────
+        # If the entire portfolio is inside a T212 auto-invest pie, direct
+        # market orders will be rejected (T212 keeps pie holdings non-tradeable
+        # at the instrument level).  Refuse to attempt them and tell the user
+        # to use POST /api/push-to-pie instead, which updates the pie's
+        # instrumentShares to match the snapshot's targets.
+        if not cfg.get("force_direct_orders_when_pie", False):
+            active_pie = _detect_active_pie(cfg)
+            if active_pie:
+                conn.close()
+                msg = (
+                    f"Pie detected (id={active_pie['id']}, value=£{active_pie.get('result', {}).get('priceAvgValue', 0):.2f}). "
+                    "Direct orders rejected because all positions are inside a pie. "
+                    "Use POST /api/push-to-pie to update pie instrumentShares to match these targets, "
+                    "or set force_direct_orders_when_pie: true if you really want to attempt direct orders."
+                )
+                log.warning(f"approve(execute=true) refused: {msg}")
+                return {
+                    "approved":         True,
+                    "approved_at":      approved_at,
+                    "executed":         False,
+                    "execution_mode":   "pie-blocked",
+                    "pie_id":           active_pie["id"],
+                    "execution_results": [],
+                    "note":             msg,
+                }
+
         actions = json.loads(row["suggested_actions"] or "[]")
 
         # ── Two-phase execution ──────────────────────────────────────────────
@@ -2684,6 +2723,67 @@ def set_group(ticker: str, body: dict = Body(default={})):
     return updated
 
 
+def _detect_active_pie(cfg: dict) -> Optional[dict]:
+    """Return the first non-empty pie on the account, or None.
+    Used by snapshot metadata to flag pie-execution mode.
+    """
+    if not cfg.get("t212_token"):
+        return None
+    try:
+        r = requests.get(
+            f"{cfg['t212_base']}/api/v0/equity/pies",
+            headers=_t212_headers(cfg), timeout=15,
+        )
+        if not r.ok:
+            return None
+        pies = r.json()
+        return pies[0] if pies else None
+    except Exception:
+        return None
+
+
+def _fetch_pie_detail(cfg: dict, pie_id: int) -> dict:
+    """Get full pie state including instrumentShares, settings, instruments."""
+    r = requests.get(
+        f"{cfg['t212_base']}/api/v0/equity/pies/{pie_id}",
+        headers=_t212_headers(cfg), timeout=20,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def _push_target_shares_to_pie(cfg: dict, pie_id: int, target_shares: dict[str, float]) -> dict:
+    """Update a T212 pie's `instrumentShares` to match `target_shares`.
+
+    `target_shares` keys are T212 tickers (matching the pie's existing keys);
+    values are decimal fractions that MUST sum to 1.0 (T212 rejects otherwise).
+
+    Pie metadata (name, icon, goal, dividendCashAction, endDate) is preserved
+    from the current pie state so the user's settings survive untouched.
+    """
+    detail   = _fetch_pie_detail(cfg, pie_id)
+    settings = detail.get("settings", {})
+
+    body = {
+        "name":               settings.get("name"),
+        "icon":               settings.get("icon"),
+        "goal":               settings.get("goal", 0),
+        "dividendCashAction": settings.get("dividendCashAction", "REINVEST"),
+        "endDate":            settings.get("endDate"),
+        "instrumentShares":   target_shares,
+    }
+    log.info(f"Updating pie {pie_id} with {len(target_shares)} instrument shares  "
+             f"(sum={sum(target_shares.values()):.4f})")
+    r = requests.post(
+        f"{cfg['t212_base']}/api/v0/equity/pies/{pie_id}",
+        headers=_t212_headers(cfg), json=body, timeout=30,
+    )
+    if not r.ok:
+        log.warning(f"Pie update rejected {r.status_code}: {r.text[:500]}")
+        return {"error": f"{r.status_code}", "detail": r.text[:500], "request_body": body}
+    return {"ok": True, "response": r.json(), "shares_pushed": target_shares}
+
+
 @app.get("/api/t212/positions")
 def t212_raw_positions():
     """Pass-through of T212's raw `/api/v0/equity/portfolio` response.
@@ -2730,6 +2830,97 @@ def t212_pies():
         raise HTTPException(502, f"T212 pies fetch failed: {exc}")
     pies = r.json()
     return {"count": len(pies), "pies": pies}
+
+
+@app.post("/api/push-to-pie")
+def push_to_pie(body: dict = Body(default={})):
+    """Update the active T212 pie's `instrumentShares` to match the latest
+    snapshot's target weights.
+
+    Use this when ALL your positions are inside an auto-invest pie (which
+    blocks direct orders).  T212 will progressively rebalance the pie toward
+    the new shares on its own auto-invest schedule.
+
+    Optional body params:
+      "pie_id":   int    — override pie auto-detection (default: first active pie)
+      "preview":  bool   — return the computed shares without submitting (default false)
+
+    Returns either {"preview": {...}} or T212's pie-update response.
+    """
+    cfg = load_config()
+
+    # Resolve pie id
+    pie_id = body.get("pie_id")
+    if pie_id is None:
+        pie = _detect_active_pie(cfg)
+        if not pie:
+            raise HTTPException(404, "No active pie detected on this account")
+        pie_id = int(pie["id"])
+
+    # Read latest snapshot's target weights and the t212_ticker mapping
+    conn = get_db()
+    row  = conn.execute(
+        "SELECT positions_json FROM snapshots ORDER BY as_of DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(503, "No snapshot exists yet — call POST /api/collect first")
+    positions = json.loads(row["positions_json"] or "[]")
+    if not positions:
+        raise HTTPException(503, "Latest snapshot has no positions")
+
+    # Build {pie_ticker: fractional_share} from positions.
+    # Pie keys MUST match what T212 currently has in instrumentShares.  We use
+    # raw_t212_ticker (what the portfolio API returned) which is what the pie
+    # also uses internally.
+    raw_shares = {}
+    for p in positions:
+        if not p.get("tradeable", True):
+            continue
+        target_int = int(p.get("target_wt", 0))
+        if target_int <= 0:
+            continue
+        ticker = p.get("raw_t212_ticker") or p.get("t212_ticker")
+        raw_shares[ticker] = raw_shares.get(ticker, 0) + target_int
+
+    if not raw_shares:
+        raise HTTPException(400, "Latest snapshot has no positive targets — nothing to push")
+
+    # Convert integer percent → fractional share, normalise to sum exactly 1.0
+    total = sum(raw_shares.values())
+    shares = {t: round(v / total, 4) for t, v in raw_shares.items()}
+    # Adjust the largest by the rounding residual so the sum is exactly 1.0
+    residual = round(1.0 - sum(shares.values()), 4)
+    if residual != 0:
+        biggest = max(shares, key=shares.get)
+        shares[biggest] = round(shares[biggest] + residual, 4)
+
+    if body.get("preview"):
+        return {
+            "preview":  True,
+            "pie_id":   pie_id,
+            "shares":   shares,
+            "share_sum": round(sum(shares.values()), 4),
+            "instruments": len(shares),
+        }
+
+    try:
+        result = _push_target_shares_to_pie(cfg, pie_id, shares)
+    except Exception as exc:
+        raise HTTPException(502, f"Pie update failed: {exc}")
+    return {"pie_id": pie_id, **result}
+
+
+@app.get("/api/t212/pie/{pie_id}")
+def t212_pie_detail(pie_id: int):
+    """Pass-through of T212's pie-detail endpoint for inspection."""
+    cfg = load_config()
+    if not cfg["t212_token"]:
+        raise HTTPException(400, "No t212_token configured")
+    try:
+        return _fetch_pie_detail(cfg, pie_id)
+    except Exception as exc:
+        raise HTTPException(502, f"Pie fetch failed: {exc}")
 
 
 @app.post("/api/test-order")
@@ -2990,7 +3181,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     # Always advertise the running collector version so HA sensors / dashboards
     # can confirm the add-on actually upgraded after a Supervisor update.
-    d["collector_version"] = "2.6.3"
+    d["collector_version"] = "2.7.0"
     for f in ["positions_json", "benchmarks_json", "drift_json", "momentum_json", "suggested_actions"]:
         key = f.replace("_json", "")
         d[key] = json.loads(d.pop(f) or ("[]" if f == "suggested_actions" else "{}"))
@@ -3032,7 +3223,7 @@ if __name__ == "__main__":
     # and ensures the /groups page works behind the ingress proxy.
     ingress_path = os.getenv("INGRESS_PATH", "")
     log.info(
-        f"Portfolio Collector v2.6.3 — phase={cfg['portfolio_phase']} — "
+        f"Portfolio Collector v2.7.0 — phase={cfg['portfolio_phase']} — "
         f"weight_mode={cfg['weight_mode']} — "
         f"DB: {DB_PATH} — T212: {cfg['t212_base']} — ingress={ingress_path or 'none'}"
     )

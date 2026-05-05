@@ -33,6 +33,9 @@ rest:
           - dynamic_group_allocations
           - cooldown_override_used
           - cooldown_override_reason
+          - pie_detected
+          - pie_id
+          - execution_mode
           - portfolio_return_pct
           - invested_value
           - cash
@@ -298,6 +301,22 @@ rest_command:
     method: POST
     content_type: "application/json"
     timeout: 10
+
+  # Push computed targets to the active T212 auto-invest pie.  Required when
+  # all positions sit inside a pie (direct orders are blocked by T212 in that
+  # case); harmless when no pie exists (the endpoint will return 404).
+  push_targets_to_pie:
+    url: "http://localhost:8000/api/push-to-pie"
+    method: POST
+    content_type: "application/json"
+    timeout: 30
+
+  preview_pie_targets:
+    url: "http://localhost:8000/api/push-to-pie"
+    method: POST
+    content_type: "application/json"
+    payload: '{"preview": true}'
+    timeout: 15
 
   # Apply the group selected in the dashboard dropdowns.
   # Extracts the t212_ticker from inside the parens of the input_select option
