@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portfolio Collector — Home Assistant Add-on v2.7.0
+Portfolio Collector — Home Assistant Add-on v2.7.1
 ===================================================
 Monitors a Trading 212 portfolio, computing drift from target weights,
 scoring momentum, benchmarking against major indices, and suggesting
@@ -34,6 +34,7 @@ import logging
 import os
 import sqlite3
 import time
+import math
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -199,7 +200,7 @@ _T212_EXCHANGE_MAP: list[tuple[str, str]] = [
     ("_US_EQ",   ""),
 ]
 
-app = FastAPI(title="Portfolio Collector", version="2.7.0")
+app = FastAPI(title="Portfolio Collector", version="2.7.1")
 
 
 # ── Ticker utilities ──────────────────────────────────────────────────────────
@@ -806,6 +807,66 @@ def _scaled_within_group_weights(holdings: list, group_allocs: dict) -> dict[str
             # No T212 history for this group yet — equal split as a safe default
             weights[h["yahoo_symbol"]] = alloc / counts[g]
     return weights
+
+
+def _signal_score(metrics: dict) -> float:
+    """Compute a normalized signal score from momentum and alpha metrics.
+
+    The score is intentionally bounded and used to tilt weights within a group.
+    """
+    if not metrics:
+        return 0.0
+
+    trend_score = float(metrics.get("trend_score") or 0.0)
+    m6         = float(metrics.get("momentum_6m") or 0.0)
+    alpha      = float(metrics.get("alpha_vs_sp500_3m") or metrics.get("rs_vs_world_3m") or 0.0)
+    vol        = float(metrics.get("volatility_3m") or 0.0)
+    corr       = float(metrics.get("corr_sp500_3m") or 0.0)
+
+    score = 0.0
+    score += trend_score * 1.25
+    score += m6 * 0.04
+    score += alpha * 0.03
+    score -= vol * 1.8
+    score -= corr * 0.4
+    return round(score, 4)
+
+
+def _signal_adjusted_within_group_weights(
+    base_weights: dict[str, float],
+    momentum: dict[str, dict],
+    holdings: list,
+    strength: float = 0.15,
+) -> dict[str, int]:
+    """Tilt within-group target weights using instrument-level signal scores.
+
+    Keeps each group's total allocation unchanged while allowing stronger
+    signals to grow at the expense of weaker ones inside the same group.
+    """
+    group_members: dict[str, list[str]] = {}
+    for h in holdings:
+        group = h.get("group", "unassigned")
+        if group == "unassigned":
+            group = "global_beta"
+        group_members.setdefault(group, []).append(h["yahoo_symbol"])
+
+    adjusted: dict[str, float] = {}
+    for group, symbols in group_members.items():
+        group_total = sum(base_weights.get(sym, 0.0) for sym in symbols)
+        raw_scores = {}
+        for sym in symbols:
+            base = base_weights.get(sym, 0.0)
+            score = _signal_score(momentum.get(sym, {}))
+            raw_scores[sym] = base * math.exp(strength * score)
+        total_raw = sum(raw_scores.values())
+        if total_raw <= 0 or group_total <= 0:
+            for sym in symbols:
+                adjusted[sym] = base_weights.get(sym, 0.0)
+            continue
+        for sym in symbols:
+            adjusted[sym] = raw_scores[sym] / total_raw * group_total
+
+    return _round_weights_to_integers(adjusted)
 
 
 def _round_weights_to_integers(raw: dict[str, float]) -> dict[str, int]:
@@ -1421,6 +1482,25 @@ def _rs_vs_world(holding: pd.Series, world: pd.Series, bars: int = 63) -> Option
     )
 
 
+def _correlation_vs_benchmark(holding: pd.Series, benchmark: pd.Series, bars: int = 63) -> Optional[float]:
+    common = holding.dropna().index.intersection(benchmark.dropna().index)
+    if len(common) < bars + 1:
+        return None
+    rets = holding.loc[common].pct_change().dropna().iloc[-bars:]
+    bench_rets = benchmark.loc[common].pct_change().dropna().iloc[-bars:]
+    if len(rets) < 10 or len(bench_rets) < 10:
+        return None
+    return float(rets.corr(bench_rets) or 0.0)
+
+
+def _volatility(series: pd.Series, bars: int = 63) -> Optional[float]:
+    s = series.dropna()
+    if len(s) < bars + 1:
+        return None
+    rets = s.pct_change().dropna().iloc[-bars:]
+    return float(rets.std()) if len(rets) > 1 else None
+
+
 def _wma_trend_score(price_series: pd.Series, lookback: int = 126) -> float:
     s = price_series.dropna()
     if len(s) < lookback + 2:
@@ -1787,6 +1867,17 @@ def compute_snapshot() -> dict:
             continue
         s  = hist[sym].dropna()
         rs = _rs_vs_world(s, world_series, 63) if world_series is not None else None
+        sp500 = hist.get(BENCHMARKS["sp500"])
+        corr_sp500 = None
+        if sp500 is not None:
+            corr_sp500 = _correlation_vs_benchmark(s, sp500, 63)
+        return_3m = round(_period_return(s, 63) or 0.0, 2)
+        alpha_vs_sp500_3m = None
+        if sp500 is not None:
+            sp500_return_3m = _period_return(sp500, 63)
+            if sp500_return_3m is not None:
+                alpha_vs_sp500_3m = round(return_3m - sp500_return_3m, 2)
+
         momentum[sym] = {
             "momentum_12m":   round(v, 2) if (v := _momentum(s, 252))    is not None else None,
             "momentum_9m":    round(v, 2) if (v := _momentum(s, 189))    is not None else None,
@@ -1795,11 +1886,17 @@ def compute_snapshot() -> dict:
             "trend":          _ema_trend(s),
             "trend_score":    _wma_trend_score(s, 126),
             "return_1m":      round(_period_return(s, 21) or 0.0, 2),
-            "return_3m":      round(_period_return(s, 63) or 0.0, 2),
+            "return_3m":      return_3m,
             "rs_vs_world_3m": rs,
+            "alpha_vs_sp500_3m": alpha_vs_sp500_3m,
+            "corr_sp500_3m":  round(corr_sp500, 4) if corr_sp500 is not None else None,
+            "volatility_3m":  _volatility(s, 63),
+            "volatility_6m":  _volatility(s, 126),
             "group":          h["group"],
             "group_order":    GROUP_ORDER.get(h["group"], 9),
         }
+
+        momentum[sym]["signal_score"] = _signal_score(momentum[sym])
 
     mom_scores: dict[str, float] = {}
     for sym, m in momentum.items():
@@ -1810,6 +1907,13 @@ def compute_snapshot() -> dict:
         m6    =  m.get("momentum_6m")  or 0.0
         m12   =  m.get("momentum_12m") or 0.0
         mom_scores[sym] = round(trend * 0.5 + m6 * 0.3 + m12 * 0.2, 2)
+
+    if cfg.get("weight_mode") == "dynamic" and any(h["group"] != "unassigned" for h in holdings):
+        signal_weights = _signal_adjusted_within_group_weights(target_weights, momentum, holdings)
+        if signal_weights != target_weights:
+            log.info("Dynamic mode: applied signal-driven within-group tilting to target weights")
+        target_weights = signal_weights
+    cfg["target_weights"] = target_weights
 
     # Live drawdown vs all-time peak (used by cooldown auto-override below)
     conn_dd = get_db()
@@ -1902,7 +2006,7 @@ def compute_snapshot() -> dict:
 
     return {
         "as_of":                as_of,
-        "collector_version":    "2.7.0",
+    "collector_version":    "2.7.1",
         "weight_mode":          cfg.get("weight_mode", "stored"),
         "portfolio_phase":      cfg.get("portfolio_phase", "Momentum-Chill"),
         "risk_score":           int(risk_score),
@@ -2273,7 +2377,7 @@ def health():
     return {
         "status":           "ok",
         "utc":              datetime.now(timezone.utc).isoformat(),
-        "version":          "2.7.0",
+    "version":          "2.7.1",
         "t212_base":        opts.get("t212_base", "https://demo.trading212.com"),
         "demo_mode":        "demo" in opts.get("t212_base", "demo"),
         "phase":            opts.get("portfolio_phase", "Momentum-Max"),
@@ -3181,7 +3285,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     # Always advertise the running collector version so HA sensors / dashboards
     # can confirm the add-on actually upgraded after a Supervisor update.
-    d["collector_version"] = "2.7.0"
+    d["collector_version"] = "2.7.1"
     for f in ["positions_json", "benchmarks_json", "drift_json", "momentum_json", "suggested_actions"]:
         key = f.replace("_json", "")
         d[key] = json.loads(d.pop(f) or ("[]" if f == "suggested_actions" else "{}"))
@@ -3223,7 +3327,7 @@ if __name__ == "__main__":
     # and ensures the /groups page works behind the ingress proxy.
     ingress_path = os.getenv("INGRESS_PATH", "")
     log.info(
-        f"Portfolio Collector v2.7.0 — phase={cfg['portfolio_phase']} — "
+    f"Portfolio Collector v2.7.1 — phase={cfg['portfolio_phase']} — "
         f"weight_mode={cfg['weight_mode']} — "
         f"DB: {DB_PATH} — T212: {cfg['t212_base']} — ingress={ingress_path or 'none'}"
     )
