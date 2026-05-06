@@ -17,4 +17,9 @@
   - Verify the running add-on with `curl -s http://localhost:8000/api/health`.
   - Sync HA YAML assets with `sync_portfolio_files.sh` when `packages/portfolio.yaml` or `lovelace/dashboard.yaml` change.
   - There is no dedicated test suite in this repo; validation is primarily through HA integration and the add-on HTTP API.
+  - **Version bumping (required for HA add-on refresh to pick up updates):**
+    - HA checks the version field in `/config.yaml` (the add-on manifest in the repo root) and `/portfolio_collector/config.yaml` (the internal config schema)
+    - Both **must** be bumped together to the same version number for updates to propagate
+    - Also update the collector module docstring at the top of `portfolio_collector/collector.py` (e.g., `v2.7.4`)
+    - Commit and push to GitHub — HA's add-on marketplace will detect the new version within minutes
 - Note: `t212_token` must be a Base64 encoding of `KEY_ID:SECRET` and is loaded from the HA add-on options file. `t212_base` defaults to Trading 212 demo mode.
