@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portfolio Collector — Home Assistant Add-on v2.7.4
+Portfolio Collector — Home Assistant Add-on v2.7.6
 ===================================================
 Monitors a Trading 212 portfolio, computing drift from target weights,
 scoring momentum, benchmarking against major indices, and suggesting
@@ -1952,6 +1952,29 @@ def compute_snapshot() -> dict:
         target_weights = signal_weights
     cfg["target_weights"] = target_weights
 
+    # ── Augment positions with momentum data for dashboard visualization ───────
+    # Add signal_score and key momentum metrics to each position so the dashboard
+    # can display within-group allocation effects from market conditions.
+    for p in positions:
+        sym = p["symbol"]
+        if sym in momentum:
+            m = momentum[sym]
+            p["signal_score"] = m.get("signal_score", 0.0)
+            p["momentum_3m"] = m.get("momentum_3m")
+            p["momentum_6m"] = m.get("momentum_6m")
+            p["momentum_12m"] = m.get("momentum_12m")
+            p["trend_score"] = m.get("trend_score")
+            p["volatility_3m"] = m.get("volatility_3m")
+            p["volatility_6m"] = m.get("volatility_6m")
+        else:
+            p["signal_score"] = 0.0
+            p["momentum_3m"] = None
+            p["momentum_6m"] = None
+            p["momentum_12m"] = None
+            p["trend_score"] = None
+            p["volatility_3m"] = None
+            p["volatility_6m"] = None
+
     # Live drawdown vs all-time peak (used by cooldown auto-override below)
     conn_dd = get_db()
     pk_dd = conn_dd.execute("SELECT MAX(portfolio_value) AS peak FROM snapshots").fetchone()
@@ -3320,7 +3343,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     # Always advertise the running collector version so HA sensors / dashboards
     # can confirm the add-on actually upgraded after a Supervisor update.
-    d["collector_version"] = "2.7.3"
+    d["collector_version"] = "2.7.6"
     for f in ["positions_json", "benchmarks_json", "drift_json", "momentum_json", "suggested_actions"]:
         key = f.replace("_json", "")
         d[key] = json.loads(d.pop(f) or ("[]" if f == "suggested_actions" else "{}"))
@@ -3362,7 +3385,7 @@ if __name__ == "__main__":
     # and ensures the /groups page works behind the ingress proxy.
     ingress_path = os.getenv("INGRESS_PATH", "")
     log.info(
-    f"Portfolio Collector v2.7.3 — phase={cfg['portfolio_phase']} — "
+    f"Portfolio Collector v2.7.6 — phase={cfg['portfolio_phase']} — "
         f"weight_mode={cfg['weight_mode']} — "
         f"DB: {DB_PATH} — T212: {cfg['t212_base']} — ingress={ingress_path or 'none'}"
     )
