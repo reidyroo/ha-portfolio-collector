@@ -5,7 +5,7 @@ description: >
   scores momentum, benchmarks against MSCI World / S&P 500 / FTSE 100 / DOW / VIX,
   and suggests rebalance trades for manual approval. No holdings list required —
   T212 is the source of truth.
-version: "2.7.2"
+version: "2.7.3"
 slug: portfolio_collector
 init: false
 url: "https://github.com/YOUR_GITHUB_USERNAME/ha-portfolio-collector"
@@ -90,16 +90,14 @@ options:
 
   # If your entire portfolio is inside a T212 auto-invest pie, direct market
   # orders are rejected by T212 (pie holdings are non-tradeable at the
-  # instrument level).  By default the collector detects this and refuses to
-  # submit direct orders; instead use POST /api/push-to-pie to update the
-  # pie's instrumentShares to match the snapshot's targets.  Set this to true
-  # to override the safeguard and attempt direct orders anyway (almost always
-  # wrong — leave at false unless you know your account doesn't use pies).
+  # instrument level).  By default the collector detects this and will
+  # automatically update the pie's instrumentShares on execute unless you
+  # explicitly override with force_direct_orders_when_pie=true.
   force_direct_orders_when_pie: false
 
   # Legacy boolean — kept for backwards compatibility with older configs.
   # If weight_mode is set, this is ignored.  If weight_mode is empty, then
-  # use_group_weights=true behaves like weight_mode="equal_in_group".
+  # use_group_weights=true behaves like weight_mode="dynamic".
   use_group_weights: false
 
   # CVaR (tail-risk) constraint — set to 0 to disable

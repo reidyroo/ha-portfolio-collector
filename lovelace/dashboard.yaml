@@ -29,7 +29,8 @@ views:
           {% if state_attr('sensor.portfolio_value', 'pie_detected') %}
 
           🥧 **Auto-invest pie active** (id {{ state_attr('sensor.portfolio_value', 'pie_id') }}) — direct orders disabled.
-          Use **Push Targets to Pie** on the Rebalance tab to apply the computed targets.
+          Approval will automatically update the pie's target shares unless
+          `force_direct_orders_when_pie` is enabled.
           {% endif %}
 
       # ── Header: value / return / cash / VIX ──────────────────────────────
@@ -448,29 +449,10 @@ views:
               content: |
                 ### 🥧 Pie Execution
                 All your positions are inside T212 pie **{{ state_attr('sensor.portfolio_value', 'pie_id') }}**.
-                Direct market orders don't work for pie holdings.  Use the buttons below
-                to update the pie's *target shares* — T212 then rebalances the pie
-                gradually toward those shares on its own auto-invest schedule.
-
-            - type: horizontal-stack
-              cards:
-                - type: button
-                  name: Preview Pie Targets
-                  icon: mdi:eye-outline
-                  tap_action:
-                    action: call-service
-                    service: rest_command.preview_pie_targets
-                - type: button
-                  name: Push Targets to Pie
-                  icon: mdi:upload-outline
-                  tap_action:
-                    action: call-service
-                    service: rest_command.push_targets_to_pie
-                    confirmation:
-                      text: >
-                        Update the pie's target shares to match the latest snapshot's
-                        targets?  T212 will rebalance the pie toward these shares
-                        gradually on its own schedule.  Continue?
+                Direct market orders don't work for pie holdings.  Approving trades
+                will automatically update the pie's target shares unless
+                `force_direct_orders_when_pie` is enabled.
+                
 
 
   # ═══════════════════════════════════

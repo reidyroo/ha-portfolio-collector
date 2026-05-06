@@ -30,7 +30,8 @@ governing when rebalances are suggested.
 - Stores group assignments in SQLite, edited via a built-in web UI at `/groups`
 - Two target-weight modes:
   - **T212 actuals** (`use_group_weights: false`) — drift relative to your real portfolio
-  - **Phase group allocations** (`use_group_weights: true`) — drift relative to a target shape
+  - **Phase group allocations** (`use_group_weights: true`) — drift relative to a target shape using
+    risk/CVaR-driven dynamic group-weight optimisation
 - Four phase presets bundling CVaR / cost / cooldown / VIX guard-rails
 - Validator + auto-recovery prevents bad targets from ever being written to a snapshot
 - One-click "Sync T212 Weights → Targets" to reset the drift baseline to current actuals

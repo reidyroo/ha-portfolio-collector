@@ -39,7 +39,8 @@ T212 account on every snapshot. There is no manual holdings list to maintain.
 - **Two target-weight modes**, toggle independently of phase:
   - `use_group_weights: false` — targets = your T212 actual weights at sync time
     (zero drift on day one; only fires on real movement)
-  - `use_group_weights: true` — targets = phase group allocations split equally within group
+  - `use_group_weights: true` — targets = phase group allocations using the
+    market/risk/CVaR-optimised dynamic weighting flow
     (actively pulls portfolio toward the configured shape)
 - **Drift detection** — integer-boundary rule with VIX-aware threshold (1pt normal, 2pt
   elevated, frozen at extreme). Single-tick rounding noise never fires a trade.
@@ -513,7 +514,7 @@ you'll always know when one took effect.
 
 The pre-2.2 boolean flag `use_group_weights` is still respected for older configs:
 
-- `use_group_weights: true` (no `weight_mode` set) → behaves like `weight_mode: equal_in_group`
+- `use_group_weights: true` (no `weight_mode` set) → behaves like `weight_mode: dynamic`
 - `use_group_weights: false` (no `weight_mode` set) → behaves like `weight_mode: stored`
 
 If `weight_mode` is set, `use_group_weights` is ignored.
@@ -552,7 +553,7 @@ All editable in the add-on Configuration tab.
 | Option | Default | Description |
 |---|---|---|
 | `portfolio_phase` | `Momentum-Chill` | One of the four named phases, or any other string for custom mode |
-| `use_group_weights` | `false` | `true` = phase group allocations, `false` = stored T212 weights |
+| `use_group_weights` | `false` | `true` = phase group allocations using risk/CVaR-driven dynamic weighting, `false` = stored T212 weights |
 
 ### Guard-rails (when `portfolio_phase` is custom)
 
@@ -747,8 +748,8 @@ curl -s http://localhost:8000/api/last-good-targets | python3 -m json.tool
    curl -X POST http://localhost:8000/api/sync-t212-weights
    curl -X POST http://localhost:8000/api/collect
    ```
-3. **Check `use_group_weights`** — if you didn't intend phase-driven targets, set it
-   to `false` in the Configuration tab and run a snapshot.
+3. **Check `use_group_weights`** — if you didn't intend the phase/market/risk-driven
+  dynamic target flow, set it to `false` in the Configuration tab and run a snapshot.
 4. **Inspect the validator** — `curl /api/last-good-targets` shows what the recovery
    baseline contains; the add-on log shows whether the validator fired.
 

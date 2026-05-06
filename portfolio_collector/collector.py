@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portfolio Collector — Home Assistant Add-on v2.7.2
+Portfolio Collector — Home Assistant Add-on v2.7.3
 ===================================================
 Monitors a Trading 212 portfolio, computing drift from target weights,
 scoring momentum, benchmarking against major indices, and suggesting
@@ -200,7 +200,7 @@ _T212_EXCHANGE_MAP: list[tuple[str, str]] = [
     ("_US_EQ",   ""),
 ]
 
-app = FastAPI(title="Portfolio Collector", version="2.7.2")
+app = FastAPI(title="Portfolio Collector", version="2.7.3")
 
 
 # ── Ticker utilities ──────────────────────────────────────────────────────────
@@ -890,6 +890,30 @@ def _round_weights_to_integers(raw: dict[str, float]) -> dict[str, int]:
     return floors
 
 
+def _pie_target_shares_from_positions(positions: list) -> dict[str, float]:
+    """Convert snapshot positions to normalized T212 pie instrument shares."""
+    raw_shares: dict[str, int] = {}
+    for p in positions:
+        if not p.get("tradeable", True):
+            continue
+        target_int = int(p.get("target_wt", 0))
+        if target_int <= 0:
+            continue
+        ticker = p.get("raw_t212_ticker") or p.get("t212_ticker")
+        raw_shares[ticker] = raw_shares.get(ticker, 0) + target_int
+
+    if not raw_shares:
+        raise ValueError("Latest snapshot has no positive targets — nothing to push")
+
+    total = sum(raw_shares.values())
+    shares = {t: round(v / total, 4) for t, v in raw_shares.items()}
+    residual = round(1.0 - sum(shares.values()), 4)
+    if residual != 0:
+        biggest = max(shares, key=shares.get)
+        shares[biggest] = round(shares[biggest] + residual, 4)
+    return shares
+
+
 def _validate_targets(positions: list) -> tuple[bool, str]:
     """Sanity-check computed target weights against actual portfolio positions.
 
@@ -1099,8 +1123,10 @@ def load_config() -> dict:
         log.warning(f"Unknown weight_mode '{weight_mode_raw}', defaulting to 'stored'")
         weight_mode = "stored"
     else:
-        # Legacy: derive from use_group_weights bool flag
-        weight_mode = "equal_in_group" if opts.get("use_group_weights") else "stored"
+        # Legacy: derive from use_group_weights bool flag.
+        # Old configs with use_group_weights=true now opt into the market/
+        # risk/CVaR-driven dynamic group-weight optimisation flow.
+        weight_mode = "dynamic" if opts.get("use_group_weights") else "stored"
 
     return {
         "t212_token":                 opts.get("t212_token", os.getenv("T212_TOKEN", "")).strip(),
@@ -1962,7 +1988,8 @@ def compute_snapshot() -> dict:
     pk_val = float(pk["peak"]) if pk and pk["peak"] else total_value
     drawdown_now = round((total_value - pk_val) / pk_val * 100 if pk_val > 0 else 0.0, 2)
 
-    # Pie detection — used by approval/execution to switch to push-to-pie mode.
+    # Pie detection — used by approval/execution to choose the correct path
+    # for direct orders versus pie instrumentShare updates.
     # Best-effort: if T212 is unreachable, leaves pie_detected=False and the
     # rebalancer falls back to direct-order behaviour as before.
     active_pie    = _detect_active_pie(cfg)
@@ -2017,7 +2044,7 @@ def compute_snapshot() -> dict:
 
     return {
         "as_of":                as_of,
-    "collector_version":    "2.7.2",
+    "collector_version":    "2.7.3",
         "weight_mode":          cfg.get("weight_mode", "stored"),
         "portfolio_phase":      cfg.get("portfolio_phase", "Momentum-Chill"),
         "risk_score":           int(risk_score),
@@ -2388,7 +2415,7 @@ def health():
     return {
         "status":           "ok",
         "utc":              datetime.now(timezone.utc).isoformat(),
-    "version":          "2.7.2",
+    "version":          "2.7.3",
         "t212_base":        opts.get("t212_base", "https://demo.trading212.com"),
         "demo_mode":        "demo" in opts.get("t212_base", "demo"),
         "phase":            opts.get("portfolio_phase", "Momentum-Max"),
@@ -2531,29 +2558,47 @@ def approve_rebalance(as_of: str, execute: bool = False):
 
         # ── Pie detection short-circuit ──────────────────────────────────────
         # If the entire portfolio is inside a T212 auto-invest pie, direct
-        # market orders will be rejected (T212 keeps pie holdings non-tradeable
-        # at the instrument level).  Refuse to attempt them and tell the user
-        # to use POST /api/push-to-pie instead, which updates the pie's
-        # instrumentShares to match the snapshot's targets.
+        # market orders will be rejected for instruments inside an auto-invest
+        # pie. If a pie is detected and the user hasn't forced direct orders,
+        # update the pie's instrumentShares automatically instead of refusing.
         if not cfg.get("force_direct_orders_when_pie", False):
             active_pie = _detect_active_pie(cfg)
             if active_pie:
+                positions = json.loads(row["positions_json"] or "[]")
+                try:
+                    shares = _pie_target_shares_from_positions(positions)
+                    result = _push_target_shares_to_pie(cfg, int(active_pie["id"]), shares)
+                    executed = "error" not in result and not result.get("response", {}).get("error")
+                except Exception as exc:
+                    conn.close()
+                    msg = (
+                        f"Pie detected (id={active_pie['id']}, value=£{active_pie.get('result', {}).get('priceAvgValue', 0):.2f}). "
+                        f"Pie update failed: {exc}"
+                    )
+                    log.warning(f"approve(execute=true) failed: {msg}")
+                    return {
+                        "approved":         True,
+                        "approved_at":      approved_at,
+                        "executed":         False,
+                        "execution_mode":   "pie",
+                        "pie_id":           active_pie["id"],
+                        "execution_results": [],
+                        "note":             msg,
+                    }
                 conn.close()
-                msg = (
-                    f"Pie detected (id={active_pie['id']}, value=£{active_pie.get('result', {}).get('priceAvgValue', 0):.2f}). "
-                    "Direct orders rejected because all positions are inside a pie. "
-                    "Use POST /api/push-to-pie to update pie instrumentShares to match these targets, "
-                    "or set force_direct_orders_when_pie: true if you really want to attempt direct orders."
+                note = (
+                    "Pie update executed automatically because an auto-invest pie was detected. "
+                    "Set force_direct_orders_when_pie: true to override and attempt direct orders."
                 )
-                log.warning(f"approve(execute=true) refused: {msg}")
+                log.info(f"approve(execute=true): pie update auto-executed for pie id={active_pie['id']}")
                 return {
                     "approved":         True,
                     "approved_at":      approved_at,
-                    "executed":         False,
-                    "execution_mode":   "pie-blocked",
+                    "executed":         executed,
+                    "execution_mode":   "pie",
                     "pie_id":           active_pie["id"],
-                    "execution_results": [],
-                    "note":             msg,
+                    "execution_results": [{"action": "push_to_pie", "result": result}],
+                    "note":             note,
                 }
 
         actions = json.loads(row["suggested_actions"] or "[]")
@@ -2984,31 +3029,10 @@ def push_to_pie(body: dict = Body(default={})):
     if not positions:
         raise HTTPException(503, "Latest snapshot has no positions")
 
-    # Build {pie_ticker: fractional_share} from positions.
-    # Pie keys MUST match what T212 currently has in instrumentShares.  We use
-    # raw_t212_ticker (what the portfolio API returned) which is what the pie
-    # also uses internally.
-    raw_shares = {}
-    for p in positions:
-        if not p.get("tradeable", True):
-            continue
-        target_int = int(p.get("target_wt", 0))
-        if target_int <= 0:
-            continue
-        ticker = p.get("raw_t212_ticker") or p.get("t212_ticker")
-        raw_shares[ticker] = raw_shares.get(ticker, 0) + target_int
-
-    if not raw_shares:
-        raise HTTPException(400, "Latest snapshot has no positive targets — nothing to push")
-
-    # Convert integer percent → fractional share, normalise to sum exactly 1.0
-    total = sum(raw_shares.values())
-    shares = {t: round(v / total, 4) for t, v in raw_shares.items()}
-    # Adjust the largest by the rounding residual so the sum is exactly 1.0
-    residual = round(1.0 - sum(shares.values()), 4)
-    if residual != 0:
-        biggest = max(shares, key=shares.get)
-        shares[biggest] = round(shares[biggest] + residual, 4)
+    try:
+        shares = _pie_target_shares_from_positions(positions)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
     if body.get("preview"):
         return {
@@ -3296,7 +3320,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     # Always advertise the running collector version so HA sensors / dashboards
     # can confirm the add-on actually upgraded after a Supervisor update.
-    d["collector_version"] = "2.7.2"
+    d["collector_version"] = "2.7.3"
     for f in ["positions_json", "benchmarks_json", "drift_json", "momentum_json", "suggested_actions"]:
         key = f.replace("_json", "")
         d[key] = json.loads(d.pop(f) or ("[]" if f == "suggested_actions" else "{}"))
@@ -3338,7 +3362,7 @@ if __name__ == "__main__":
     # and ensures the /groups page works behind the ingress proxy.
     ingress_path = os.getenv("INGRESS_PATH", "")
     log.info(
-    f"Portfolio Collector v2.7.2 — phase={cfg['portfolio_phase']} — "
+    f"Portfolio Collector v2.7.3 — phase={cfg['portfolio_phase']} — "
         f"weight_mode={cfg['weight_mode']} — "
         f"DB: {DB_PATH} — T212: {cfg['t212_base']} — ingress={ingress_path or 'none'}"
     )

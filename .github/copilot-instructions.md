@@ -6,8 +6,8 @@
 - Home Assistant integration is implemented via `packages/portfolio.yaml` and `lovelace/dashboard.yaml`:
   - `packages/portfolio.yaml` creates REST sensors from `/api/latest-snapshot`, rest_commands that call `/api/collect`, `/api/approve/latest`, `/api/groups/{ticker}`, etc., and automations for daily collection and approval flows.
   - `lovelace/dashboard.yaml` renders the dashboard from HA entities and sensor attributes such as `collector_version`, `effective_risk`, `cooldown_override_reason`, `positions`, and `group_summary`.
-- Keep the add-on API contract stable. The HA package/dashboard depend on specific JSON fields and endpoints like `/api/health`, `/api/latest-snapshot`, `/api/approve/latest`, `/api/set-phase`, `/api/set-risk-score`, `/api/notch-up`, `/api/groups/{ticker}`, and `/api/push-to-pie`.
-  If T212 reports the account is inside an auto-invest pie, direct instrument-level orders are blocked. The collector detects pies via `/api/v0/equity/pies` and switches to the `POST /api/push-to-pie` flow, which updates the pie's `instrumentShares` rather than submitting standard buy/sell orders.
+- Keep the add-on API contract stable. The HA package/dashboard depend on specific JSON fields and endpoints like `/api/health`, `/api/latest-snapshot`, `/api/approve/latest`, `/api/set-phase`, `/api/set-risk-score`, `/api/notch-up`, and `/api/groups/{ticker}`.
+  If T212 reports the account is inside an auto-invest pie, direct instrument-level orders are blocked. The collector detects pies via `/api/v0/equity/pies` and automatically updates the pie's `instrumentShares` during approval execution unless `force_direct_orders_when_pie` is enabled.
 - Important project-specific patterns:
   - Group assignment uses `input_select.portfolio_assign_instrument` options formatted as `SYMBOL (TICKER)` and `rest_command.assign_instrument_group` extracts the ticker by parsing that string.
   - `approve_and_execute_rebalance` uses `latest` in the URL to avoid stale HA sensor cache issues.
