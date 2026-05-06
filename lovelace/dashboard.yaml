@@ -10,29 +10,6 @@ views:
     type: masonry
     cards:
 
-      # ── Running collector version (verify add-on actually upgraded) ─────
-      - type: markdown
-        content: |
-          **Collector:** v{{ state_attr('sensor.portfolio_value', 'collector_version') or 'unknown' }} ·
-          **Phase:** {{ states('input_select.portfolio_phase') }} ·
-          **Weight mode:** {{ state_attr('sensor.portfolio_value', 'weight_mode') or 'unknown' }}
-          {% if state_attr('sensor.portfolio_value', 'weight_mode') == 'dynamic' %}
-          · **Risk:** {{ state_attr('sensor.portfolio_value', 'risk_score') }} → effective {{ state_attr('sensor.portfolio_value', 'effective_risk') }}
-          ({{ state_attr('sensor.portfolio_value', 'effective_risk_reason') }})
-          {% endif %}
-          · **Drawdown:** {{ state_attr('sensor.portfolio_value', 'drawdown_pct') }}%
-          · **Snapshot:** {{ state_attr('sensor.portfolio_value', 'as_of') or 'none yet' }}
-          {% if state_attr('sensor.portfolio_value', 'cooldown_override_used') %}
-
-          ⚠ **Cooldown override:** {{ state_attr('sensor.portfolio_value', 'cooldown_override_reason') }}
-          {% endif %}
-          {% if state_attr('sensor.portfolio_value', 'pie_detected') %}
-
-          🥧 **Auto-invest pie active** (id {{ state_attr('sensor.portfolio_value', 'pie_id') }}) — direct orders disabled.
-          Approval will automatically update the pie's target shares unless
-          `force_direct_orders_when_pie` is enabled.
-          {% endif %}
-
       # ── Header: value / return / cash / VIX ──────────────────────────────
       - type: glance
         title: Portfolio Summary
@@ -115,6 +92,18 @@ views:
       - type: entity
         entity: sensor.snapshot_age_hours
         name: Last Snapshot Age (hours)
+
+      # ── Data cleanup info ──────────────────────────────────────────────────
+      - type: markdown
+        content: |
+          **Clean up spiky data points:**
+          To remove erroneous snapshots or spikes that skew 90-day history:
+          ```
+          curl -X DELETE "http://localhost:8000/api/snapshots?date=2026-04-28"
+          curl -X DELETE "http://localhost:8000/api/snapshots?date=2026-04-20"
+          ```
+          Re-run the dashboard to refresh charts. Use `?before=YYYY-MM-DD`, 
+          `?after=YYYY-MM-DD`, or `?max_value=N` for fine-tuned filtering.
 
 
   # ═══════════════════════════════
@@ -380,6 +369,42 @@ views:
                 data:
                   entity_id: input_number.portfolio_risk_score
                   value: 90
+
+      # ── Dynamic group allocations (when dynamic mode is active) ──────────
+      - type: markdown
+        title: Calculated Group Allocations
+        content: |
+          **Current market conditions & signal-driven adjustments:**
+
+          {% set effective_risk = state_attr('sensor.portfolio_value', 'effective_risk') %}
+          {% set risk_reason = state_attr('sensor.portfolio_value', 'effective_risk_reason') %}
+          {% set dynamic_allocs = state_attr('sensor.portfolio_value', 'dynamic_group_allocations') %}
+          {% set weight_mode = state_attr('sensor.portfolio_value', 'weight_mode') %}
+
+          {% if weight_mode == 'dynamic' and effective_risk is not none %}
+          **Effective Risk:** {{ effective_risk | round(1) }}/100 
+          *({{ risk_reason }})*
+
+          | Group | Allocation | Notes |
+          |-------|:----------:|-------|
+          {% if dynamic_allocs %}
+          {%- set m_core = dynamic_allocs.get('momentum_core', 0) | round(1) %}
+          {%- set g_beta = dynamic_allocs.get('global_beta', 0) | round(1) %}
+          {%- set reg_sat = dynamic_allocs.get('regional_satellite', 0) | round(1) %}
+          {%- set def = dynamic_allocs.get('defensive', 0) | round(1) %}
+          {%- set opt_fac = dynamic_allocs.get('optional_factor', 0) | round(1) %}
+          | **Momentum Core** | {{ m_core }}% | Growth exposure adjusted by VIX, drawdown, rally signals |
+          | **Global Beta** | {{ g_beta }}% | Broad diversification baseline |
+          | **Regional Satellite** | {{ reg_sat }}% | Tactical positioning |
+          | **Defensive** | {{ def }}% | Drawdown protection |
+          | **Optional Factor** | {{ opt_fac }}% | Alt factors or tactical |
+          | **Total** | {{ (m_core + g_beta + reg_sat + def + opt_fac) | round(1) }}% | |
+          {% else %}
+          *Loading…*
+          {% endif %}
+          {% else %}
+          *Dynamic mode not active. Set `weight_mode: dynamic` or `use_group_weights: true` to enable market-driven adjustments.*
+          {% endif %}
 
       # ── Cooldown override (notch up) ──────────────────────────────────────
       - type: markdown
