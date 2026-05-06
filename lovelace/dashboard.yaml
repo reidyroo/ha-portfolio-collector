@@ -414,26 +414,21 @@ views:
 
           {% set positions = state_attr('sensor.portfolio_snapshot', 'positions') or [] %}
           {% if positions %}
-          {%- set by_group = {} %}
-          {%- for p in positions | sort(attribute='group_order') %}
-            {%- if p.group and p.group != 'unassigned' %}
-              {%- set group_list = by_group.setdefault(p.group, []) %}
-              {%- set _ = group_list.append(p) %}
-            {%- endif %}
-          {%- endfor %}
-
-          {%- if by_group %}
-          {%- for group, instruments in by_group.items() | sort %}
+          {%- set grouped = positions | selectattr('group', 'defined') | selectattr('group', 'ne', 'unassigned') | list %}
+          {%- set groups = grouped | map(attribute='group') | unique | list | sort %}
+          {%- if groups %}
+          {%- for group in groups %}
+          {%- set instruments = grouped | selectattr('group', 'equalto', group) | list | sort(attribute='display_name') %}
           **{{ group | upper }}**
 
           | Instrument | Actual % | Target % | Drift | Signal | 3m Mom | Trend |
           |:-----------|--------:|--------:|------:|-------:|-------:|:-----:|
-          {%- for inst in instruments | sort(attribute='display_name') %}
-          {%- set signal = inst.signal_score or 0.0 %}
+          {%- for inst in instruments %}
+          {%- set signal = inst.signal_score | default(0.0) | float %}
           {%- set signal_icon = '🟢' if signal > 0.1 else '🔴' if signal < -0.1 else '⚫' %}
-          {%- set mom3m = inst.momentum_3m or 0 %}
-          {%- set trend_score = inst.trend_score or 0 %}
-          {%- set trend_icon = '📈' if trend_score and trend_score > 0.5 else '📉' if trend_score and trend_score < -0.5 else '➡️' %}
+          {%- set mom3m = inst.momentum_3m | default(0) %}
+          {%- set trend_score = inst.trend_score | default(0) | float %}
+          {%- set trend_icon = '📈' if trend_score > 0.5 else '📉' if trend_score < -0.5 else '➡️' %}
           | **{{ inst.display_name }}** | {{ inst.actual_wt | round(2) }}% | {{ inst.target_wt | round(2) }}% | {{ inst.drift_abs | round(2) }}% | {{ signal_icon }} {{ signal | round(3) }} | {{ mom3m }}% | {{ trend_icon }} |
           {%- endfor %}
 
