@@ -311,35 +311,35 @@ template:
 
       # ── Group weight sensors for donut chart ───────────────────────────────
       - name: "Portfolio Group Weight Momentum Core"
-        unique_id: portfolio_group_weight_momentum_core
+        unique_id: portfolio_group_weight_momentum_core_2
         unit_of_measurement: "%"
         state: >
           {% set snap = state_attr('sensor.portfolio_snapshot', 'group_summary') %}
           {{ snap.momentum_core.actual_wt | round(1) if snap and 'momentum_core' in snap else 0 }}
 
       - name: "Portfolio Group Weight Global Beta"
-        unique_id: portfolio_group_weight_global_beta
+        unique_id: portfolio_group_weight_global_beta_2
         unit_of_measurement: "%"
         state: >
           {% set snap = state_attr('sensor.portfolio_snapshot', 'group_summary') %}
           {{ snap.global_beta.actual_wt | round(1) if snap and 'global_beta' in snap else 0 }}
 
       - name: "Portfolio Group Weight Regional Satellite"
-        unique_id: portfolio_group_weight_regional_satellite
+        unique_id: portfolio_group_weight_regional_satellite_2
         unit_of_measurement: "%"
         state: >
           {% set snap = state_attr('sensor.portfolio_snapshot', 'group_summary') %}
           {{ snap.regional_satellite.actual_wt | round(1) if snap and 'regional_satellite' in snap else 0 }}
 
       - name: "Portfolio Group Weight Defensive"
-        unique_id: portfolio_group_weight_defensive
+        unique_id: portfolio_group_weight_defensive_2
         unit_of_measurement: "%"
         state: >
           {% set snap = state_attr('sensor.portfolio_snapshot', 'group_summary') %}
           {{ snap.defensive.actual_wt | round(1) if snap and 'defensive' in snap else 0 }}
 
       - name: "Portfolio Group Weight Optional Factor"
-        unique_id: portfolio_group_weight_optional_factor
+        unique_id: portfolio_group_weight_optional_factor_2
         unit_of_measurement: "%"
         state: >
           {% set snap = state_attr('sensor.portfolio_snapshot', 'group_summary') %}
