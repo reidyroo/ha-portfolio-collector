@@ -238,6 +238,113 @@ template:
             unknown
           {% endif %}
 
+      # ── Health score sub-components ────────────────────────────────────────
+      - name: "Portfolio Health Return Edge"
+        unique_id: portfolio_health_return_edge
+        unit_of_measurement: "/100"
+        state: >
+          {% set alpha = states('sensor.portfolio_alpha_msci') | float(0) %}
+          {{ [[0, (alpha * 5 + 50) | round(1)] | max, 100] | min }}
+
+      - name: "Portfolio Health Resilience"
+        unique_id: portfolio_health_resilience
+        unit_of_measurement: "/100"
+        state: >
+          {% set dd = state_attr('sensor.portfolio_value', 'drawdown_pct') | float(0) %}
+          {{ [[0, (100 + dd * 3) | round(1)] | max, 100] | min }}
+
+      - name: "Portfolio Health Drift Discipline"
+        unique_id: portfolio_health_drift_discipline
+        unit_of_measurement: "/100"
+        state: >
+          {% set snap = state_attr('sensor.portfolio_snapshot', 'group_summary') %}
+          {% if snap %}
+            {% set ns = namespace(d=0) %}
+            {% for g in ['momentum_core','global_beta','regional_satellite','defensive','optional_factor'] %}
+              {% if g in snap %}{% set ns.d = ns.d + ((snap[g].actual_wt - snap[g].target_wt) | abs) %}{% endif %}
+            {% endfor %}
+            {{ [[0, (100 - ns.d * 4) | round(1)] | max, 100] | min }}
+          {% else %}50{% endif %}
+
+      - name: "Portfolio Health Momentum Quality"
+        unique_id: portfolio_health_momentum_quality
+        unit_of_measurement: "/100"
+        state: >
+          {% set positions = state_attr('sensor.portfolio_snapshot', 'positions') %}
+          {% if positions %}
+            {% set ns = namespace(t=0, n=0) %}
+            {% for p in positions %}
+              {% if p.signal_score is defined and p.signal_score != none %}
+                {% set ns.t = ns.t + (p.signal_score | float) %}
+                {% set ns.n = ns.n + 1 %}
+              {% endif %}
+            {% endfor %}
+            {% if ns.n > 0 %}{{ [[0, (ns.t / ns.n * 500 + 50) | round(1)] | max, 100] | min }}
+            {% else %}50{% endif %}
+          {% else %}50{% endif %}
+
+      # ── Composite health score and state ───────────────────────────────────
+      - name: "Portfolio Health Score"
+        unique_id: portfolio_health_score
+        unit_of_measurement: "/100"
+        state: >
+          {% set re = states('sensor.portfolio_health_return_edge') | float(50) %}
+          {% set rs = states('sensor.portfolio_health_resilience') | float(50) %}
+          {% set dd = states('sensor.portfolio_health_drift_discipline') | float(50) %}
+          {% set mq = states('sensor.portfolio_health_momentum_quality') | float(50) %}
+          {{ (re * 0.35 + rs * 0.25 + dd * 0.20 + mq * 0.20) | round(0) | int }}
+
+      - name: "Portfolio Health State"
+        unique_id: portfolio_health_state
+        state: >
+          {% set s = states('sensor.portfolio_health_score') | float(0) %}
+          {% if s >= 80 %}Strong
+          {% elif s >= 65 %}Acceptable
+          {% elif s >= 50 %}Caution
+          {% else %}Weak{% endif %}
+        icon: >
+          {% set s = states('sensor.portfolio_health_score') | float(0) %}
+          {% if s >= 80 %}mdi:heart-pulse
+          {% elif s >= 65 %}mdi:heart
+          {% elif s >= 50 %}mdi:heart-half-full
+          {% else %}mdi:heart-broken{% endif %}
+
+      # ── Group weight sensors for donut chart ───────────────────────────────
+      - name: "Group Weight Momentum Core"
+        unique_id: portfolio_group_weight_momentum_core
+        unit_of_measurement: "%"
+        state: >
+          {% set snap = state_attr('sensor.portfolio_snapshot', 'group_summary') %}
+          {{ snap.momentum_core.actual_wt | round(1) if snap and 'momentum_core' in snap else 0 }}
+
+      - name: "Group Weight Global Beta"
+        unique_id: portfolio_group_weight_global_beta
+        unit_of_measurement: "%"
+        state: >
+          {% set snap = state_attr('sensor.portfolio_snapshot', 'group_summary') %}
+          {{ snap.global_beta.actual_wt | round(1) if snap and 'global_beta' in snap else 0 }}
+
+      - name: "Group Weight Regional Satellite"
+        unique_id: portfolio_group_weight_regional_satellite
+        unit_of_measurement: "%"
+        state: >
+          {% set snap = state_attr('sensor.portfolio_snapshot', 'group_summary') %}
+          {{ snap.regional_satellite.actual_wt | round(1) if snap and 'regional_satellite' in snap else 0 }}
+
+      - name: "Group Weight Defensive"
+        unique_id: portfolio_group_weight_defensive
+        unit_of_measurement: "%"
+        state: >
+          {% set snap = state_attr('sensor.portfolio_snapshot', 'group_summary') %}
+          {{ snap.defensive.actual_wt | round(1) if snap and 'defensive' in snap else 0 }}
+
+      - name: "Group Weight Optional Factor"
+        unique_id: portfolio_group_weight_optional_factor
+        unit_of_measurement: "%"
+        state: >
+          {% set snap = state_attr('sensor.portfolio_snapshot', 'group_summary') %}
+          {{ snap.optional_factor.actual_wt | round(1) if snap and 'optional_factor' in snap else 0 }}
+
 
 # ── REST commands ────────────────────────────────────────────────────────────
 rest_command:

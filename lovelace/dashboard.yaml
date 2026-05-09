@@ -10,7 +10,40 @@ views:
     type: masonry
     cards:
 
-      # ── Header: value / return / cash / VIX ──────────────────────────────
+      # ── Health gauge + state ──────────────────────────────────────────────
+      - type: horizontal-stack
+        cards:
+          - type: gauge
+            entity: sensor.portfolio_health_score
+            name: Portfolio Health
+            min: 0
+            max: 100
+            needle: true
+            severity:
+              red: 0
+              yellow: 50
+              green: 65
+
+          - type: entity
+            entity: sensor.portfolio_health_state
+            name: Health State
+
+      # ── Health breakdown: why the score is what it is ─────────────────────
+      - type: markdown
+        title: Health Breakdown
+        content: |
+          | Component | Score | Driver |
+          |-----------|:-----:|--------|
+          | Return Edge (35%) | **{{ states('sensor.portfolio_health_return_edge') | float | int }}**/100 | Alpha vs MSCI: {% set a = states('sensor.portfolio_alpha_msci') | float(0) %}{% if a >= 0 %}+{% endif %}{{ a | round(1) }}% |
+          | Resilience (25%) | **{{ states('sensor.portfolio_health_resilience') | float | int }}**/100 | Drawdown: {{ state_attr('sensor.portfolio_value', 'drawdown_pct') | float(0) | round(1) }}% |
+          | Drift Discipline (20%) | **{{ states('sensor.portfolio_health_drift_discipline') | float | int }}**/100 | {% set sn = state_attr('sensor.portfolio_snapshot', 'group_summary') %}{% if sn %}{% set ns = namespace(d=0) %}{% for g in ['momentum_core','global_beta','regional_satellite','defensive','optional_factor'] %}{% if g in sn %}{% set ns.d = ns.d + ((sn[g].actual_wt - sn[g].target_wt) | abs) %}{% endif %}{% endfor %}Group drift total: {{ ns.d | round(1) }}pp{% else %}—{% endif %} |
+          | Momentum Quality (20%) | **{{ states('sensor.portfolio_health_momentum_quality') | float | int }}**/100 | Regime: {{ states('sensor.vix_regime') }} · VIX {{ states('sensor.vix_level') | float(0) | round(1) }} |
+
+          {% set rb = states('sensor.rebalance_signal') %}{% set appr = state_attr('sensor.rebalance_signal', 'approved') %}
+          {% if rb == '1' %}⚠ **Rebalance suggested** — {{ state_attr('sensor.rebalance_signal', 'rebalance_reason') }}{% endif %}
+          {% if appr %} ✅ *Trades approved*{% endif %}
+
+      # ── Portfolio summary ─────────────────────────────────────────────────
       - type: glance
         title: Portfolio Summary
         show_state: true
@@ -25,10 +58,53 @@ views:
           - entity: sensor.vix_level
             name: VIX
 
-      # ── VIX regime ────────────────────────────────────────────────────────
-      - type: entity
-        entity: sensor.vix_regime
-        name: Market Regime
+      # ── Alpha vs benchmarks ───────────────────────────────────────────────
+      - type: glance
+        title: Alpha vs Benchmarks (since purchase)
+        show_state: true
+        show_name: true
+        entities:
+          - entity: sensor.portfolio_alpha_msci
+            name: vs MSCI World
+          - entity: sensor.portfolio_alpha_sp500
+            name: vs S&P 500
+
+      # ── Group allocation donut ────────────────────────────────────────────
+      - type: custom:apexcharts-card
+        chart_type: donut
+        header:
+          show: true
+          title: Portfolio Composition — by Group (actual %)
+          show_states: false
+        series:
+          - entity: sensor.portfolio_group_weight_momentum_core
+            name: Momentum Core
+            color: "#FF6B35"
+          - entity: sensor.portfolio_group_weight_global_beta
+            name: Global Beta
+            color: "#4CAF50"
+          - entity: sensor.portfolio_group_weight_regional_satellite
+            name: Regional Satellite
+            color: "#2196F3"
+          - entity: sensor.portfolio_group_weight_defensive
+            name: Defensive
+            color: "#9C27B0"
+          - entity: sensor.portfolio_group_weight_optional_factor
+            name: Optional Factor
+            color: "#FF9800"
+        apex_config:
+          legend:
+            show: true
+            position: bottom
+          plotOptions:
+            pie:
+              donut:
+                size: "65%"
+                labels:
+                  show: true
+                  total:
+                    show: true
+                    label: "Invested"
 
       # ── Portfolio value history ───────────────────────────────────────────
       - type: custom:apexcharts-card
@@ -45,65 +121,10 @@ views:
             fill_raw: zero
             opacity: 0.15
 
-      # ── Benchmark returns since purchase ─────────────────────────────────
-      - type: glance
-        title: Returns Since Purchase (%)
-        show_state: true
-        show_name: true
-        entities:
-          - entity: sensor.portfolio_return
-            name: Portfolio
-          - entity: sensor.msci_world_return_since_purchase
-            name: MSCI World
-          - entity: sensor.sp500_return_since_purchase
-            name: S&P 500
-          - entity: sensor.ftse100_return_since_purchase
-            name: FTSE 100
-          - entity: sensor.dow_return_since_purchase
-            name: DOW
-
-      # ── Alpha vs benchmarks since purchase ───────────────────────────────
-      - type: glance
-        title: Alpha vs Benchmarks (since purchase)
-        show_state: true
-        show_name: true
-        entities:
-          - entity: sensor.portfolio_alpha_sp500
-            name: vs S&P 500
-          - entity: sensor.portfolio_alpha_msci
-            name: vs MSCI World
-
-      # ── VIX history ───────────────────────────────────────────────────────
-      - type: custom:apexcharts-card
-        header:
-          show: true
-          title: VIX — 90 days
-          show_states: true
-        graph_span: 90d
-        series:
-          - entity: sensor.vix_level
-            name: VIX
-            color: "#FF5722"
-            stroke_width: 2
-            fill_raw: zero
-            opacity: 0.1
-
       # ── Freshness ─────────────────────────────────────────────────────────
       - type: entity
         entity: sensor.snapshot_age_hours
         name: Last Snapshot Age (hours)
-
-      # ── Data cleanup info ──────────────────────────────────────────────────
-      - type: markdown
-        content: |
-          **Clean up spiky data points:**
-          To remove erroneous snapshots or spikes that skew 90-day history:
-          ```
-          curl -X DELETE "http://localhost:8000/api/snapshots?date=2026-04-28"
-          curl -X DELETE "http://localhost:8000/api/snapshots?date=2026-04-20"
-          ```
-          Re-run the dashboard to refresh charts. Use `?before=YYYY-MM-DD`, 
-          `?after=YYYY-MM-DD`, or `?max_value=N` for fine-tuned filtering.
 
 
   # ═══════════════════════════════
@@ -116,7 +137,7 @@ views:
     max_columns: 2
     cards:
 
-      # ── Group allocation summary ────────────────────────────────────────
+      # ── Group summary ─────────────────────────────────────────────────────
       - type: markdown
         title: Allocation by Group
         content: |
@@ -135,52 +156,36 @@ views:
           *No snapshot yet — trigger a collection.*
           {% endif %}
 
-      # ── Holdings table ──────────────────────────────────────────────────
+      # ── Holdings table ────────────────────────────────────────────────────
       - type: markdown
-        title: Current Holdings & Drift
+        title: Current Holdings
         content: |
           {% set positions = state_attr('sensor.portfolio_snapshot', 'positions') %}
           {% if positions %}
           | Group | Symbol | Actual % | Target % | Drift % | P&L % | Value £ |
           |-------|--------|:--------:|:--------:|:-------:|:-----:|--------:|
           {% for p in positions | sort(attribute='actual_wt', reverse=True) | sort(attribute='group_order') -%}
-          | {{ p.group | replace('_',' ') | title }} | **{{ p.symbol }}** | {{ p.actual_wt | round(1) }} | {{ p.target_wt | int }} | {{ p.drift_rel | round(1) }} | {{ p.pnl_pct | round(2) }} | {{ p.market_value | round(0) | int }} |
+          {%- set d = p.drift_rel | float(0) | round(1) -%}
+          {%- set drift_icon = '🔴' if d > 15 else '🟠' if d < -15 else '🟢' -%}
+          | {{ p.group | replace('_',' ') | title }} | **{{ p.symbol }}** | {{ p.actual_wt | round(1) }} | {{ p.target_wt | int }} | {{ drift_icon }} {{ "%+.1f" | format(d) }} | {{ p.pnl_pct | round(2) }} | {{ p.market_value | round(0) | int }} |
           {% endfor %}
+          *🟢 on-target · 🔴 over · 🟠 under (±15% threshold)*
           {% else %}
           *No snapshot yet — trigger a collection.*
           {% endif %}
 
-      # ── Drift table ─────────────────────────────────────────────────────
+      # ── Momentum scores ───────────────────────────────────────────────────
       - type: markdown
-        title: Relative Drift per Holding (%)
-        content: |
-          {% set positions = state_attr('sensor.portfolio_snapshot', 'positions') %}
-          {% if positions %}
-          | Symbol | Drift % | |
-          |--------|--------:|:---|
-          {% for p in positions | sort(attribute='actual_wt', reverse=True) | sort(attribute='group_order') -%}
-          {%- set d = p.drift_rel | float | round(1) -%}
-          {%- set bars = [((d | abs) / 5) | round(0, 'floor') | int, 8] | min -%}
-          {%- set bs = namespace(s='') -%}{%- for _ in range(bars) -%}{%- set bs.s = bs.s ~ '■' -%}{%- endfor -%}
-          | **{{ p.symbol }}** | {{ "%+.1f" | format(d) }} | {% if d > 15 %}🔴 {% elif d >= 0 %}🟢 {% elif d < -15 %}🟠 {% else %}🔵 {% endif %}{{ bs.s }} |
-          {% endfor %}
-          *🟢 over · 🔵 under · 🔴🟠 beyond ±15% threshold · each ■ ≈ 5%*
-          {% else %}
-          *No snapshot yet — trigger a collection.*
-          {% endif %}
-
-      # ── Momentum scores ─────────────────────────────────────────────────
-      - type: markdown
-        title: Momentum Scores
+        title: Momentum & Signal Scores
         content: |
           {% set positions = state_attr('sensor.portfolio_snapshot', 'positions') %}
           {% set mom = state_attr('sensor.portfolio_snapshot', 'momentum') %}
           {% if mom and positions %}
-          | Symbol | 12m | 9m | 6m | 3m | Trend | Signal |
-          |--------|:---:|:--:|:--:|:--:|:-----:|:------:|
+          | Symbol | 12m | 6m | 3m | Trend | Signal |
+          |--------|:---:|:--:|:--:|:-----:|:------:|
           {% for p in positions | sort(attribute='actual_wt', reverse=True) | sort(attribute='group_order') -%}
           {%- set m = mom[p.symbol] if p.symbol in mom else {} -%}
-          | **{{ p.symbol }}** | {% if m.momentum_12m is defined and m.momentum_12m != None %}{{ m.momentum_12m | round(1) }}%{% else %}—{% endif %} | {% if m.momentum_9m is defined and m.momentum_9m != None %}{{ m.momentum_9m | round(1) }}%{% else %}—{% endif %} | {% if m.momentum_6m is defined and m.momentum_6m != None %}{{ m.momentum_6m | round(1) }}%{% else %}—{% endif %} | {% if m.momentum_3m is defined and m.momentum_3m != None %}{{ m.momentum_3m | round(1) }}%{% else %}—{% endif %} | {{ m.trend | default('—') }} | {% if m.trend_score is defined and m.trend_score != None %}{% set ts = m.trend_score | float %}{% if ts > 0.02 %}📈{% elif ts < -0.02 %}📉{% else %}➡️{% endif %} {{ ts | round(3) }}{% else %}—{% endif %} |
+          | **{{ p.symbol }}** | {% if m.momentum_12m is defined and m.momentum_12m != None %}{{ m.momentum_12m | round(1) }}%{% else %}—{% endif %} | {% if m.momentum_6m is defined and m.momentum_6m != None %}{{ m.momentum_6m | round(1) }}%{% else %}—{% endif %} | {% if m.momentum_3m is defined and m.momentum_3m != None %}{{ m.momentum_3m | round(1) }}%{% else %}—{% endif %} | {{ m.trend | default('—') }} | {% if m.trend_score is defined and m.trend_score != None %}{% set ts = m.trend_score | float %}{% if ts > 0.02 %}📈{% elif ts < -0.02 %}📉{% else %}➡️{% endif %} {{ ts | round(3) }}{% else %}—{% endif %} |
           {% endfor %}
           {% else %}
           *Momentum data not available yet.*
@@ -206,49 +211,16 @@ views:
           - entity: sensor.vix_level
             name: VIX
 
-      # ── Active phase summary ──────────────────────────────────────────────
+      # ── Active phase (compact) ─────────────────────────────────────────────
       - type: markdown
-        title: Active Phase Settings
+        title: Active Phase
         content: |
           {% set p = states('input_select.portfolio_phase') %}
-          {% if p == 'Momentum-Max' %}
-          **Momentum-Max** — early accumulation, maximum growth
-          | Group | Target | | Setting | Value |
-          |---|:---:|---|---|:---:|
-          | Momentum Core | 35% | | CVaR limit | 6.5% |
-          | Global Beta | 40% | | Cost filter | 0.10% |
-          | Regional Satellite | 15% | | Cooldown | 21 days |
-          | Defensive | 5% | | VIX high at | 25 |
-          | Optional Factor | 5% | | | |
-          {% elif p == 'Momentum-Chill' %}
-          **Momentum-Chill** — original portfolio pattern, balanced momentum
-          | Group | Target | | Setting | Value |
-          |---|:---:|---|---|:---:|
-          | Momentum Core | 30% | | CVaR limit | 5.5% |
-          | Global Beta | 28% | | Cost filter | 0.10% |
-          | Regional Satellite | 22% | | Cooldown | 21 days |
-          | Defensive | 16% | | VIX high at | 25 |
-          | Optional Factor | 4% | | | |
-          {% elif p == 'Balanced Growth' %}
-          **Balanced Growth** — mid-career, growing volatility cushion
-          | Group | Target | | Setting | Value |
-          |---|:---:|---|---|:---:|
-          | Momentum Core | 25% | | CVaR limit | 4.5% |
-          | Global Beta | 38% | | Cost filter | 0.10% |
-          | Regional Satellite | 17% | | Cooldown | 21 days |
-          | Defensive | 15% | | VIX high at | 25 |
-          | Optional Factor | 5% | | | |
-          {% elif p == 'Pre-Retirement' %}
-          **Pre-Retirement** — capital preservation, bonds dominate
-          | Group | Target | | Setting | Value |
-          |---|:---:|---|---|:---:|
-          | Momentum Core | 10% | | CVaR limit | 3.0% |
-          | Global Beta | 33% | | Cost filter | 0.20% |
-          | Regional Satellite | 12% | | Cooldown | 28 days |
-          | Defensive | 35% | | VIX high at | 20 |
-          | Optional Factor | 10% | | | |
-          {% else %}
-          **{{ p }}** — custom settings active (configured in add-on options)
+          {% if p == 'Momentum-Max' %}**Momentum-Max** · CVaR 6.5% · Cooldown 21d · VIX gate 25
+          {% elif p == 'Momentum-Chill' %}**Momentum-Chill** · CVaR 5.5% · Cooldown 21d · VIX gate 25
+          {% elif p == 'Balanced Growth' %}**Balanced Growth** · CVaR 4.5% · Cooldown 21d · VIX gate 25
+          {% elif p == 'Pre-Retirement' %}**Pre-Retirement** · CVaR 3.0% · Cooldown 28d · VIX gate 20
+          {% else %}**{{ p }}** · custom settings active (configured in add-on options)
           {% endif %}
 
       - type: markdown
@@ -297,35 +269,6 @@ views:
             Approving trades will submit **real orders** to Trading 212.
             Verify the trade plan above before toggling approval.
 
-      # ── Catalog ───────────────────────────────────────────────────────────
-      - type: button
-        name: Refresh Instrument Catalog
-        icon: mdi:database-refresh-outline
-        tap_action:
-          action: call-service
-          service: rest_command.refresh_instrument_catalog
-          confirmation:
-            text: >
-              Force a fresh catalog fetch from T212? This counts against the
-              API rate limit (1 request per 50 seconds). Only needed if new
-              instruments have been added to your T212 account and are not
-              appearing in snapshots.
-
-      # ── Sync T212 Weights ─────────────────────────────────────────────────
-      - type: button
-        name: Sync T212 Weights → Targets
-        icon: mdi:scale-balance
-        tap_action:
-          action: call-service
-          service: rest_command.sync_t212_weights
-          confirmation:
-            text: >
-              Reset every instrument's stored target weight to its current
-              actual weight in T212. After the next snapshot, drift will be
-              ~0% across the board and no rebalance will fire until the
-              portfolio actually moves. Only affects "use_group_weights=False"
-              mode. Continue?
-
       # ── Risk score (dynamic mode) ─────────────────────────────────────────
       - type: entities
         title: Dynamic Risk Score
@@ -370,82 +313,11 @@ views:
                   entity_id: input_number.portfolio_risk_score
                   value: 90
 
-      # ── Dynamic group allocations (when dynamic mode is active) ──────────
-      - type: markdown
-        title: Calculated Group Allocations
-        content: |
-          **Current market conditions & signal-driven adjustments:**
-
-          {% set effective_risk = state_attr('sensor.portfolio_value', 'effective_risk') %}
-          {% set risk_reason = state_attr('sensor.portfolio_value', 'effective_risk_reason') %}
-          {% set dynamic_allocs = state_attr('sensor.portfolio_value', 'dynamic_group_allocations') %}
-          {% set weight_mode = state_attr('sensor.portfolio_value', 'weight_mode') %}
-
-          {% if weight_mode == 'dynamic' and effective_risk is not none %}
-          **Effective Risk:** {{ effective_risk | round(1) }}/100 
-          *({{ risk_reason }})*
-
-          | Group | Allocation | Notes |
-          |-------|:----------:|-------|
-          {% if dynamic_allocs %}
-          {%- set m_core = dynamic_allocs.get('momentum_core', 0) | round(1) %}
-          {%- set g_beta = dynamic_allocs.get('global_beta', 0) | round(1) %}
-          {%- set reg_sat = dynamic_allocs.get('regional_satellite', 0) | round(1) %}
-          {%- set def = dynamic_allocs.get('defensive', 0) | round(1) %}
-          {%- set opt_fac = dynamic_allocs.get('optional_factor', 0) | round(1) %}
-          | **Momentum Core** | {{ m_core }}% | Growth exposure adjusted by VIX, drawdown, rally signals |
-          | **Global Beta** | {{ g_beta }}% | Broad diversification baseline |
-          | **Regional Satellite** | {{ reg_sat }}% | Tactical positioning |
-          | **Defensive** | {{ def }}% | Drawdown protection |
-          | **Optional Factor** | {{ opt_fac }}% | Alt factors or tactical |
-          | **Total** | {{ (m_core + g_beta + reg_sat + def + opt_fac) | round(1) }}% | |
-          {% else %}
-          *Loading…*
-          {% endif %}
-          {% else %}
-          *Dynamic mode not active. Set `weight_mode: dynamic` or `use_group_weights: true` to enable market-driven adjustments.*
-          {% endif %}
-
-      # ── Instrument-level allocations within each group ────────────────────
-      - type: markdown
-        title: Instrument Allocations (Signal-Driven Tilts)
-        content: |
-          **Instruments within each group — showing effect of market conditions on weights:**
-
-          {% set positions = state_attr('sensor.portfolio_snapshot', 'positions') or [] %}
-          {% if positions %}
-          {%- set grouped = positions | selectattr('group', 'defined') | selectattr('group', 'ne', 'unassigned') | list %}
-          {%- set groups = grouped | map(attribute='group') | unique | list | sort %}
-          {%- if groups %}
-          {%- for group in groups %}
-          {%- set instruments = grouped | selectattr('group', 'equalto', group) | list | sort(attribute='display_name') %}
-          **{{ group | upper }}**
-
-          | Instrument | Actual % | Target % | Drift | Signal | 3m Mom | Trend |
-          |:-----------|--------:|--------:|------:|-------:|-------:|:-----:|
-          {%- for inst in instruments %}
-          {%- set signal = inst.signal_score | default(0.0) | float %}
-          {%- set signal_icon = '🟢' if signal > 0.1 else '🔴' if signal < -0.1 else '⚫' %}
-          {%- set mom3m = inst.momentum_3m | default(0) %}
-          {%- set trend_score = inst.trend_score | default(0) | float %}
-          {%- set trend_icon = '📈' if trend_score > 0.5 else '📉' if trend_score < -0.5 else '➡️' %}
-          | **{{ inst.display_name }}** | {{ inst.actual_wt | round(2) }}% | {{ inst.target_wt | round(2) }}% | {{ inst.drift_abs | round(2) }}% | {{ signal_icon }} {{ signal | round(3) }} | {{ mom3m }}% | {{ trend_icon }} |
-          {%- endfor %}
-
-          {% endfor %}
-          {% else %}
-          *No positions assigned to groups yet.*
-          {% endif %}
-          {% else %}
-          *Waiting for first snapshot. Run **Run Snapshot Now** to generate data.*
-          {% endif %}
-
-      # ── Cooldown override (notch up) ──────────────────────────────────────
+      # ── Cooldown override ─────────────────────────────────────────────────
       - type: markdown
         content: |
           **Cooldown override:** allow the next snapshot to fire a rebalance
           even if the {{ state_attr('sensor.rebalance_signal', 'min_days') or 21 }}-day cooldown is still active.
-          Use during sharp market moves (bull run-up or bear sell-off).
           One-shot — clears automatically when consumed.
 
       - type: horizontal-stack
@@ -468,34 +340,61 @@ views:
               action: call-service
               service: rest_command.cancel_notch_up
 
-      - type: button
-        name: Run Snapshot Now
-        icon: mdi:refresh
-        tap_action:
-          action: call-service
-          service: rest_command.trigger_portfolio_collect
-          confirmation:
-            text: Trigger a portfolio snapshot collection now?
+      # ── Action buttons ────────────────────────────────────────────────────
+      - type: horizontal-stack
+        cards:
+          - type: button
+            name: Run Snapshot Now
+            icon: mdi:refresh
+            tap_action:
+              action: call-service
+              service: rest_command.trigger_portfolio_collect
+              confirmation:
+                text: Trigger a portfolio snapshot collection now?
+          - type: button
+            name: Dry Run Approval
+            icon: mdi:check-outline
+            tap_action:
+              action: call-service
+              service: rest_command.approve_rebalance_dry_run
+              confirmation:
+                text: Mark rebalance as approved without placing any orders?
+          - type: button
+            name: Reset Cooldown
+            icon: mdi:timer-refresh-outline
+            tap_action:
+              action: call-service
+              service: rest_command.reset_rebalance_cooldown
+              confirmation:
+                text: Clear the cooldown timer? Use after a failed execution to allow an immediate retry.
 
-      - type: button
-        name: Approve — Dry Run (no orders)
-        icon: mdi:check-outline
-        tap_action:
-          action: call-service
-          service: rest_command.approve_rebalance_dry_run
-          confirmation:
-            text: Mark rebalance as approved without placing any orders?
+      # ── Utility buttons ───────────────────────────────────────────────────
+      - type: horizontal-stack
+        cards:
+          - type: button
+            name: Refresh Catalog
+            icon: mdi:database-refresh-outline
+            tap_action:
+              action: call-service
+              service: rest_command.refresh_instrument_catalog
+              confirmation:
+                text: >
+                  Force a fresh catalog fetch from T212? This counts against the
+                  API rate limit (1 request per 50 seconds). Only needed if new
+                  instruments have been added and are not appearing in snapshots.
+          - type: button
+            name: Sync T212 → Targets
+            icon: mdi:scale-balance
+            tap_action:
+              action: call-service
+              service: rest_command.sync_t212_weights
+              confirmation:
+                text: >
+                  Reset every instrument's stored target weight to its current
+                  actual weight in T212. Drift will be ~0% after the next snapshot.
+                  Only affects "use_group_weights=False" mode. Continue?
 
-      - type: button
-        name: Reset Rebalance Cooldown
-        icon: mdi:timer-refresh-outline
-        tap_action:
-          action: call-service
-          service: rest_command.reset_rebalance_cooldown
-          confirmation:
-            text: Clear the cooldown timer? Use after a failed execution to allow an immediate retry.
-
-      # ── Pie controls (only meaningful when an auto-invest pie is active) ──
+      # ── Pie controls ──────────────────────────────────────────────────────
       - type: conditional
         conditions:
           - entity: sensor.portfolio_value
@@ -508,10 +407,9 @@ views:
               content: |
                 ### 🥧 Pie Execution
                 All your positions are inside T212 pie **{{ state_attr('sensor.portfolio_value', 'pie_id') }}**.
-                Direct market orders don't work for pie holdings.  Approving trades
+                Direct market orders don't work for pie holdings. Approving trades
                 will automatically update the pie's target shares unless
                 `force_direct_orders_when_pie` is enabled.
-                
 
 
   # ═══════════════════════════════════
@@ -570,6 +468,36 @@ views:
             fill_raw: zero
             opacity: 0.15
 
+      - type: custom:apexcharts-card
+        header:
+          show: true
+          title: VIX — 90 days
+          show_states: true
+        graph_span: 90d
+        series:
+          - entity: sensor.vix_level
+            name: VIX
+            color: "#FF5722"
+            stroke_width: 2
+            fill_raw: zero
+            opacity: 0.1
+
+      - type: glance
+        title: Returns Since Purchase (%)
+        show_state: true
+        show_name: true
+        entities:
+          - entity: sensor.portfolio_return
+            name: Portfolio
+          - entity: sensor.msci_world_return_since_purchase
+            name: MSCI World
+          - entity: sensor.sp500_return_since_purchase
+            name: S&P 500
+          - entity: sensor.ftse100_return_since_purchase
+            name: FTSE 100
+          - entity: sensor.dow_return_since_purchase
+            name: DOW
+
 
   # ═══════════════════════════════════
   # View 5: Instrument Groups
@@ -582,7 +510,6 @@ views:
       - type: markdown
         content: |
           ## Instrument Groups
-
           Assign each holding to a strategy group. Groups drive phase allocations
           used for rebalance target weights when `weight_mode` is anything
           other than `stored`.
@@ -590,7 +517,7 @@ views:
           **New instruments** added to your T212 account appear here automatically
           after the next snapshot and are tagged **Unassigned** until you classify them.
 
-      # ── Assignment form: pick instrument + group, click Apply ──────────────
+      # ── Assignment form ────────────────────────────────────────────────────
       - type: entities
         title: Assign Group
         show_header_toggle: false
@@ -609,7 +536,6 @@ views:
             action_name: APPLY
             service: rest_command.assign_instrument_group
 
-      # ── Run a snapshot to refresh the table below ─────────────────────────
       - type: button
         name: Run Snapshot Now (refresh table)
         icon: mdi:refresh
@@ -617,7 +543,7 @@ views:
           action: call-service
           service: rest_command.trigger_portfolio_collect
 
-      # ── Live table of current group assignments (from latest snapshot) ────
+      # ── Current assignments ────────────────────────────────────────────────
       - type: markdown
         content: |
           ### Current assignments
@@ -638,41 +564,11 @@ views:
 
           {% set unassigned = (positions | selectattr('group', 'eq', 'unassigned') | list | length) %}
           {% if unassigned > 0 %}
-          ⚠ **{{ unassigned }} instrument(s) need a group** — pick them in the
-          dropdown above and assign.
+          ⚠ **{{ unassigned }} instrument(s) need a group** — pick them in the dropdown above and assign.
           {% endif %}
 
           {% set untradeable = (positions | rejectattr('tradeable') | list | length) %}
           {% if untradeable > 0 %}
-          🚫 **{{ untradeable }} instrument(s) marked untradeable** — auto-flagged
-          after T212 persistently rejected orders. They appear in actuals but
-          are excluded from rebalance trade plans. Re-enable manually via
-          `POST /api/groups/<ticker>/tradeable {"tradeable": true}` once the
-          underlying position is fixed in T212.
+          🚫 **{{ untradeable }} instrument(s) marked untradeable** — auto-flagged after T212 persistently
+          rejected orders. Re-enable via `POST /api/groups/<ticker>/tradeable {"tradeable": true}`.
           {% endif %}
-
-      - type: glance
-        title: Returns Since Purchase (%)
-        entities:
-          - entity: sensor.msci_world_return_since_purchase
-            name: MSCI World
-          - entity: sensor.sp500_return_since_purchase
-            name: S&P 500
-          - entity: sensor.ftse100_return_since_purchase
-            name: FTSE 100
-          - entity: sensor.dow_return_since_purchase
-            name: DOW
-          - entity: sensor.vix_level
-            name: VIX
-
-      - type: glance
-        title: 3-Month Returns (%)
-        entities:
-          - entity: sensor.msci_world_return_3m
-            name: MSCI World
-          - entity: sensor.sp500_return_3m
-            name: S&P 500
-          - entity: sensor.ftse100_return_1m
-            name: FTSE 100
-          - entity: sensor.dow_return_1m
-            name: DOW
