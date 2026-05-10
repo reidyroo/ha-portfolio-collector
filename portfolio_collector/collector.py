@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portfolio Collector — Home Assistant Add-on v2.8.4
+Portfolio Collector — Home Assistant Add-on v2.8.5
 ===================================================
 Monitors a Trading 212 portfolio, computing drift from target weights,
 scoring momentum, benchmarking against major indices, and suggesting
@@ -2211,6 +2211,7 @@ def _compute_rebalance(cfg, positions, mom_scores, momentum, vix, total_value, m
             "drift_rel":          p["drift_rel"],
             "momentum_score":     mom_scores.get(sym, 0.0),
             "balancing_trade":    balancing,
+            "current_price":      p["current_price"],
         }
 
     actions   = []
@@ -2687,12 +2688,27 @@ def approve_rebalance(as_of: str, execute: bool = False):
         snapshot_cash = float(_row_to_dict(row).get("cash") or 0.0)
         running_budget = cash_freed + snapshot_cash
 
-        for action in sorted(buys, key=lambda a: -abs(a.get("delta_value", 0))):
-            need = abs(float(action.get("delta_value", 0)))
+        # Balancing trades go last — they soak up whatever cash is left after
+        # the targeted buys have settled, so their size is determined at
+        # execution time rather than snapshot time.
+        for action in sorted(buys, key=lambda a: (bool(a.get("balancing_trade")), -abs(a.get("delta_value", 0)))):
+            precision = int(action.get("quantity_precision", 2))
+            if action.get("balancing_trade"):
+                # Use all remaining cash rather than the stale snapshot estimate.
+                price = float(action.get("current_price") or 0)
+                if price <= 0:
+                    _record(action, {"skipped": "balancing-trade-no-price"})
+                    continue
+                qty  = running_budget / price
+                need = running_budget
+            else:
+                need = abs(float(action.get("delta_value", 0)))
+                qty  = action["delta_units"]
+
             if need > running_budget + 0.50:   # 50p slack for FX rounding
                 skip = {
-                    "skipped": "insufficient-cash-budget",
-                    "needed":  round(need, 2),
+                    "skipped":   "insufficient-cash-budget",
+                    "needed":    round(need, 2),
                     "available": round(running_budget, 2),
                 }
                 _record(action, skip)
@@ -2701,8 +2717,8 @@ def approve_rebalance(as_of: str, execute: bool = False):
                 result = place_market_order(
                     cfg,
                     action["t212_ticker"],
-                    action["delta_units"],
-                    precision=int(action.get("quantity_precision", 2)),
+                    qty,
+                    precision=precision,
                 )
             except Exception as exc:
                 result = {"error": "exception", "detail": str(exc)}
@@ -3353,7 +3369,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     # Always advertise the running collector version so HA sensors / dashboards
     # can confirm the add-on actually upgraded after a Supervisor update.
-    d["collector_version"] = "2.8.4"
+    d["collector_version"] = "2.8.5"
     for f in ["positions_json", "benchmarks_json", "drift_json", "momentum_json", "suggested_actions"]:
         key = f.replace("_json", "")
         d[key] = json.loads(d.pop(f) or ("[]" if f == "suggested_actions" else "{}"))
@@ -3395,7 +3411,7 @@ if __name__ == "__main__":
     # and ensures the /groups page works behind the ingress proxy.
     ingress_path = os.getenv("INGRESS_PATH", "")
     log.info(
-    f"Portfolio Collector v2.8.4 — phase={cfg['portfolio_phase']} — "
+    f"Portfolio Collector v2.8.5 — phase={cfg['portfolio_phase']} — "
         f"weight_mode={cfg['weight_mode']} — "
         f"DB: {DB_PATH} — T212: {cfg['t212_base']} — ingress={ingress_path or 'none'}"
     )
