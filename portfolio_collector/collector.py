@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portfolio Collector — Home Assistant Add-on v2.8.3
+Portfolio Collector — Home Assistant Add-on v2.8.4
 ===================================================
 Monitors a Trading 212 portfolio, computing drift from target weights,
 scoring momentum, benchmarking against major indices, and suggesting
@@ -32,6 +32,7 @@ GET  /groups                             HTML group-management UI (ingress panel
 import json
 import logging
 import os
+import re
 import sqlite3
 import time
 import math
@@ -2947,16 +2948,25 @@ def _push_target_shares_to_pie(cfg: dict, pie_id: int, target_shares: dict[str, 
     detail   = _fetch_pie_detail(cfg, pie_id)
     settings = detail.get("settings", {})
 
+    # Increment a trailing " vN" in the pie name — workaround for T212 API
+    # sometimes ignoring instrumentShares updates when nothing else changes.
+    current_name = settings.get("name") or f"Pie {pie_id}"
+    m = re.search(r"^(.*?)\s+v(\d+)$", current_name)
+    if m:
+        new_name = f"{m.group(1)} v{int(m.group(2)) + 1}"
+    else:
+        new_name = f"{current_name} v1"
+
     body = {
-        "name":               settings.get("name"),
+        "name":               new_name,
         "icon":               settings.get("icon"),
         "goal":               settings.get("goal", 0),
         "dividendCashAction": settings.get("dividendCashAction", "REINVEST"),
         "endDate":            settings.get("endDate"),
         "instrumentShares":   target_shares,
     }
-    log.info(f"Updating pie {pie_id} with {len(target_shares)} instrument shares  "
-             f"(sum={sum(target_shares.values()):.4f})")
+    log.info(f"Updating pie {pie_id} name '{current_name}' → '{new_name}' with "
+             f"{len(target_shares)} instrument shares (sum={sum(target_shares.values()):.4f})")
     r = requests.post(
         f"{cfg['t212_base']}/api/v0/equity/pies/{pie_id}",
         headers=_t212_headers(cfg), json=body, timeout=30,
@@ -3343,7 +3353,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     # Always advertise the running collector version so HA sensors / dashboards
     # can confirm the add-on actually upgraded after a Supervisor update.
-    d["collector_version"] = "2.8.3"
+    d["collector_version"] = "2.8.4"
     for f in ["positions_json", "benchmarks_json", "drift_json", "momentum_json", "suggested_actions"]:
         key = f.replace("_json", "")
         d[key] = json.loads(d.pop(f) or ("[]" if f == "suggested_actions" else "{}"))
@@ -3385,7 +3395,7 @@ if __name__ == "__main__":
     # and ensures the /groups page works behind the ingress proxy.
     ingress_path = os.getenv("INGRESS_PATH", "")
     log.info(
-    f"Portfolio Collector v2.8.3 — phase={cfg['portfolio_phase']} — "
+    f"Portfolio Collector v2.8.4 — phase={cfg['portfolio_phase']} — "
         f"weight_mode={cfg['weight_mode']} — "
         f"DB: {DB_PATH} — T212: {cfg['t212_base']} — ingress={ingress_path or 'none'}"
     )
