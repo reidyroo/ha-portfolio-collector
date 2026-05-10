@@ -58,16 +58,24 @@ views:
           - entity: sensor.vix_level
             name: VIX
 
-      # ── Alpha vs benchmarks ───────────────────────────────────────────────
-      - type: glance
-        title: Alpha vs Benchmarks (since purchase)
-        show_state: true
-        show_name: true
-        entities:
-          - entity: sensor.portfolio_alpha_msci
-            name: vs MSCI World
-          - entity: sensor.portfolio_alpha_sp500
-            name: vs S&P 500
+      # ── Allocation by group ───────────────────────────────────────────────
+      - type: markdown
+        title: Allocation by Group
+        content: |
+          {% set snap = state_attr('sensor.portfolio_snapshot', 'group_summary') %}
+          {% if snap %}
+          | Group | Target % | Actual % | Δ |
+          |-------|:--------:|:--------:|:---:|
+          {% for gkey in ['momentum_core','global_beta','regional_satellite','defensive','optional_factor'] -%}
+          {%- if gkey in snap -%}
+          {%- set g = snap[gkey] -%}
+          {%- set delta = (g.actual_wt - g.target_wt) | round(1) -%}
+          | **{{ g.label }}** | {{ g.target_wt | int }} | {{ g.actual_wt | round(1) }} | {% if delta > 2 %}🔴 +{{ delta }}{% elif delta < -2 %}🟠 {{ delta }}{% else %}🟢 {{ delta }}{% endif %} |
+          {% endif -%}
+          {%- endfor %}
+          {% else %}
+          *No snapshot yet — trigger a collection.*
+          {% endif %}
 
       # ── Group allocation donut ────────────────────────────────────────────
       - type: custom:apexcharts-card
@@ -121,10 +129,34 @@ views:
             fill_raw: zero
             opacity: 0.15
 
-      # ── Freshness ─────────────────────────────────────────────────────────
-      - type: entity
-        entity: sensor.snapshot_age_hours
-        name: Last Snapshot Age (hours)
+      # ── Return history (portfolio vs benchmarks) ──────────────────────────
+      - type: custom:apexcharts-card
+        header:
+          show: true
+          title: Return History — 90 days (%)
+          show_states: true
+        graph_span: 90d
+        series:
+          - entity: sensor.portfolio_return
+            name: Portfolio
+            color: "#4CAF50"
+            stroke_width: 3
+          - entity: sensor.msci_world_return_1m
+            name: MSCI World
+            color: "#2196F3"
+            stroke_width: 2
+          - entity: sensor.sp500_return_1m
+            name: S&P 500
+            color: "#FF9800"
+            stroke_width: 2
+          - entity: sensor.ftse100_return_1m
+            name: FTSE 100
+            color: "#9C27B0"
+            stroke_width: 2
+          - entity: sensor.dow_return_1m
+            name: DOW
+            color: "#F44336"
+            stroke_width: 2
 
 
   # ═══════════════════════════════
@@ -136,25 +168,6 @@ views:
     type: masonry
     max_columns: 2
     cards:
-
-      # ── Group summary ─────────────────────────────────────────────────────
-      - type: markdown
-        title: Allocation by Group
-        content: |
-          {% set snap = state_attr('sensor.portfolio_snapshot', 'group_summary') %}
-          {% if snap %}
-          | Group | Target % | Actual % | Δ |
-          |-------|:--------:|:--------:|:---:|
-          {% for gkey in ['momentum_core','global_beta','regional_satellite','defensive','optional_factor'] -%}
-          {%- if gkey in snap -%}
-          {%- set g = snap[gkey] -%}
-          {%- set delta = (g.actual_wt - g.target_wt) | round(1) -%}
-          | **{{ g.label }}** | {{ g.target_wt | int }} | {{ g.actual_wt | round(1) }} | {% if delta > 2 %}🔴 +{{ delta }}{% elif delta < -2 %}🟠 {{ delta }}{% else %}🟢 {{ delta }}{% endif %} |
-          {% endif -%}
-          {%- endfor %}
-          {% else %}
-          *No snapshot yet — trigger a collection.*
-          {% endif %}
 
       # ── Holdings table ────────────────────────────────────────────────────
       - type: markdown
@@ -210,6 +223,8 @@ views:
             name: VIX Regime
           - entity: sensor.vix_level
             name: VIX
+          - entity: sensor.snapshot_age_hours
+            name: Snapshot Age (h)
 
       # ── Active phase (compact) ─────────────────────────────────────────────
       - type: markdown
@@ -424,34 +439,6 @@ views:
       - type: custom:apexcharts-card
         header:
           show: true
-          title: Return History — 90 days (%)
-          show_states: true
-        graph_span: 90d
-        series:
-          - entity: sensor.portfolio_return
-            name: Portfolio
-            color: "#4CAF50"
-            stroke_width: 3
-          - entity: sensor.msci_world_return_1m
-            name: MSCI World
-            color: "#2196F3"
-            stroke_width: 2
-          - entity: sensor.sp500_return_1m
-            name: S&P 500
-            color: "#FF9800"
-            stroke_width: 2
-          - entity: sensor.ftse100_return_1m
-            name: FTSE 100
-            color: "#9C27B0"
-            stroke_width: 2
-          - entity: sensor.dow_return_1m
-            name: DOW
-            color: "#F44336"
-            stroke_width: 2
-
-      - type: custom:apexcharts-card
-        header:
-          show: true
           title: Alpha History — 90 days (%)
         graph_span: 90d
         series:
@@ -506,6 +493,7 @@ views:
     path: groups
     icon: mdi:tag-multiple-outline
     type: masonry
+    max_columns: 2
     cards:
       - type: markdown
         content: |
@@ -535,13 +523,6 @@ views:
             icon: mdi:content-save-check
             action_name: APPLY
             service: rest_command.assign_instrument_group
-
-      - type: button
-        name: Run Snapshot Now (refresh table)
-        icon: mdi:refresh
-        tap_action:
-          action: call-service
-          service: rest_command.trigger_portfolio_collect
 
       # ── Current assignments ────────────────────────────────────────────────
       - type: markdown
