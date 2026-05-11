@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portfolio Collector — Home Assistant Add-on v2.8.6
+Portfolio Collector — Home Assistant Add-on v2.8.7
 ===================================================
 Monitors a Trading 212 portfolio, computing drift from target weights,
 scoring momentum, benchmarking against major indices, and suggesting
@@ -2565,6 +2565,57 @@ def delete_snapshots(
     }
 
 
+@app.post("/api/snapshots/anchor")
+def anchor_snapshot(body: dict = Body(default={})):
+    """Insert or update a minimal anchor snapshot to pin the return baseline.
+
+    Use this to set the portfolio value on a specific historical date so that
+    portfolio_return_pct and benchmark return_since_purchase are calculated
+    from that value rather than T212's (rebalance-resettable) cost basis.
+
+    Body fields:
+      date  — YYYY-MM-DD  (required)
+      value — portfolio value in GBP (required)
+      cash  — free cash in GBP (optional, default 0)
+
+    If a snapshot already exists for that date its portfolio_value (and cash)
+    are updated; otherwise a minimal stub row is inserted.
+    """
+    date  = body.get("date")
+    value = body.get("value")
+    if not date or value is None:
+        raise HTTPException(400, "Both 'date' (YYYY-MM-DD) and 'value' (float) are required")
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "'value' must be a number")
+
+    as_of = f"{date}T00:00:00+00:00"
+    cash  = float(body.get("cash", 0))
+    conn  = get_db()
+    existing = conn.execute("SELECT as_of FROM snapshots WHERE as_of LIKE ?", (f"{date}%",)).fetchone()
+    if existing:
+        conn.execute(
+            "UPDATE snapshots SET portfolio_value=?, cash=? WHERE as_of LIKE ?",
+            (value, cash, f"{date}%"),
+        )
+        action = "updated"
+        as_of  = existing["as_of"]
+    else:
+        conn.execute(
+            """INSERT INTO snapshots
+               (as_of, portfolio_value, invested_value, cash, portfolio_return_pct,
+                positions_json, benchmarks_json, drift_json, momentum_json)
+               VALUES (?, ?, ?, ?, 0, '[]', '{}', '{}', '{}')""",
+            (as_of, value, value, cash),
+        )
+        action = "inserted"
+    conn.commit()
+    conn.close()
+    log.info(f"Anchor snapshot {action}: as_of={as_of}  value=£{value:.2f}  cash=£{cash:.2f}")
+    return {"action": action, "as_of": as_of, "portfolio_value": value, "cash": cash}
+
+
 @app.post("/api/collect")
 def trigger_collect():
     """Trigger a full snapshot. Called daily by HA automation at market close."""
@@ -3390,7 +3441,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     # Always advertise the running collector version so HA sensors / dashboards
     # can confirm the add-on actually upgraded after a Supervisor update.
-    d["collector_version"] = "2.8.6"
+    d["collector_version"] = "2.8.7"
     for f in ["positions_json", "benchmarks_json", "drift_json", "momentum_json", "suggested_actions"]:
         key = f.replace("_json", "")
         d[key] = json.loads(d.pop(f) or ("[]" if f == "suggested_actions" else "{}"))
@@ -3432,7 +3483,7 @@ if __name__ == "__main__":
     # and ensures the /groups page works behind the ingress proxy.
     ingress_path = os.getenv("INGRESS_PATH", "")
     log.info(
-    f"Portfolio Collector v2.8.6 — phase={cfg['portfolio_phase']} — "
+    f"Portfolio Collector v2.8.7 — phase={cfg['portfolio_phase']} — "
         f"weight_mode={cfg['weight_mode']} — "
         f"DB: {DB_PATH} — T212: {cfg['t212_base']} — ingress={ingress_path or 'none'}"
     )
