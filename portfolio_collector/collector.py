@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portfolio Collector — Home Assistant Add-on v2.8.8
+Portfolio Collector — Home Assistant Add-on v2.8.9
 ===================================================
 Monitors a Trading 212 portfolio, computing drift from target weights,
 scoring momentum, benchmarking against major indices, and suggesting
@@ -2616,6 +2616,48 @@ def anchor_snapshot(body: dict = Body(default={})):
     return {"action": action, "as_of": as_of, "portfolio_value": value, "cash": cash}
 
 
+@app.post("/api/snapshots/backfill-returns")
+def backfill_returns():
+    """Recompute portfolio_return_pct for every snapshot relative to the earliest one.
+
+    Use this after setting an anchor snapshot (POST /api/snapshots/anchor) to
+    retrofit all historical return values in the DB so charts reflect the
+    correct baseline rather than T212 cost-basis figures.
+    """
+    conn = get_db()
+    earliest = conn.execute(
+        "SELECT as_of, portfolio_value FROM snapshots ORDER BY as_of ASC LIMIT 1"
+    ).fetchone()
+    if not earliest or not earliest["portfolio_value"]:
+        conn.close()
+        raise HTTPException(400, "No snapshots in DB — nothing to backfill")
+
+    base_value = float(earliest["portfolio_value"])
+    base_date  = earliest["as_of"]
+
+    rows = conn.execute("SELECT as_of, portfolio_value FROM snapshots ORDER BY as_of").fetchall()
+    updated = 0
+    for row in rows:
+        pv = row["portfolio_value"]
+        if pv is None:
+            continue
+        new_pct = (float(pv) - base_value) / base_value * 100
+        conn.execute(
+            "UPDATE snapshots SET portfolio_return_pct=? WHERE as_of=?",
+            (round(new_pct, 2), row["as_of"]),
+        )
+        updated += 1
+
+    conn.commit()
+    conn.close()
+    log.info(f"backfill-returns: {updated} rows updated  base={base_date}  value=£{base_value:.2f}")
+    return {
+        "updated":    updated,
+        "base_date":  base_date,
+        "base_value": base_value,
+    }
+
+
 @app.post("/api/collect")
 def trigger_collect():
     """Trigger a full snapshot. Called daily by HA automation at market close."""
@@ -3441,7 +3483,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     # Always advertise the running collector version so HA sensors / dashboards
     # can confirm the add-on actually upgraded after a Supervisor update.
-    d["collector_version"] = "2.8.8"
+    d["collector_version"] = "2.8.9"
     for f in ["positions_json", "benchmarks_json", "drift_json", "momentum_json", "suggested_actions"]:
         key = f.replace("_json", "")
         d[key] = json.loads(d.pop(f) or ("[]" if f == "suggested_actions" else "{}"))
@@ -3483,7 +3525,7 @@ if __name__ == "__main__":
     # and ensures the /groups page works behind the ingress proxy.
     ingress_path = os.getenv("INGRESS_PATH", "")
     log.info(
-    f"Portfolio Collector v2.8.8 — phase={cfg['portfolio_phase']} — "
+    f"Portfolio Collector v2.8.9 — phase={cfg['portfolio_phase']} — "
         f"weight_mode={cfg['weight_mode']} — "
         f"DB: {DB_PATH} — T212: {cfg['t212_base']} — ingress={ingress_path or 'none'}"
     )
