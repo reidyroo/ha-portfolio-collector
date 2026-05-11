@@ -576,14 +576,24 @@ Five views, accessible from the Investment Monitor sidebar entry:
 
 | View | Contents |
 |---|---|
-| **Overview** | Collector version banner, value (90d chart), total return, free cash, VIX regime, benchmark returns since purchase, alpha vs S&P 500 / MSCI World, snapshot age |
-| **Holdings & Drift** | Allocation by group (target vs actual + delta), per-holding table (group, symbol, actual %, target %, drift %, P&L %, value), relative drift bar chart, momentum scores |
-| **Rebalance** | Status, phase settings, drift slider, live-mode toggle, trade plan table, sync / snapshot / approval / cooldown-reset buttons |
-| **Benchmarks** | 90d return chart, alpha history, since-purchase + 3M returns |
-| **Groups** | Markdown intro + Open Group Manager button (opens add-on's `/groups` UI directly) |
+| **Overview** | Portfolio Health gauge + state, Health Breakdown table (4 sub-scores + drivers + rebalance alert), Portfolio Summary glance (value / return / cash / VIX), Allocation by Group table, Group donut chart, Portfolio Value 90d chart, Return History 90d chart (portfolio vs benchmarks) |
+| **Holdings** | Holdings table (group / symbol / actual % / target % / drift % / P&L % / value), Momentum & Signal Scores table |
+| **Rebalance** | Status glance (rebalance signal / VIX regime / VIX / snapshot age), Active Phase summary, Rebalance Reason, Trade Plan table, Controls (phase selector / drift threshold / live mode / approve), Dynamic Risk Score slider, Cooldown override buttons, Action buttons (Run Snapshot / Dry Run / Reset Cooldown / Refresh Catalog / Sync T212 Targets) |
+| **Benchmarks** | Alpha History 90d chart (vs S&P 500 / MSCI World), VIX 90d chart, Returns Since Purchase glance |
+| **Groups** | Assign Group form (instrument + group dropdowns + Apply button), Current assignments table |
 
-The collector version banner at the top of Overview shows what version produced the
-latest snapshot — use it to verify upgrades took effect.
+### Portfolio Health Score
+
+A composite 0–100 score computed entirely from HA template sensors (no backend changes needed):
+
+| Sub-score | Weight | Formula |
+|---|:---:|---|
+| Return Edge | 35% | `clamp(alpha_vs_MSCI × 5 + 50, 0, 100)` — alpha 0 = 50, +10% alpha = 100 |
+| Resilience | 25% | `clamp(100 + drawdown_pct × 3, 0, 100)` — drawdown −10% = 70 |
+| Drift Discipline | 20% | `clamp(100 − total_group_drift × 4, 0, 100)` |
+| Momentum Quality | 20% | `clamp(avg_signal_score × 500 + 50, 0, 100)` |
+
+**Health states:** Strong (≥80) / Acceptable (≥65) / Caution (≥50) / Weak (<50).
 
 ---
 
@@ -599,7 +609,9 @@ The add-on serves a REST API on port 8000.
 | `GET` | `/api/latest-snapshot` | Most recent snapshot (consumed by HA REST sensors) |
 | `GET` | `/api/snapshots?limit=N` | Snapshot history (default 90) |
 | `GET` | `/api/snapshots?summary=true` | Lightweight: just `as_of` + `portfolio_value` |
-| `DELETE` | `/api/snapshots?date=YYYY-MM-DD` | Delete all snapshots for a given date |
+| `DELETE` | `/api/snapshots` | Delete snapshots by filter — see [Database management](#database-management-via-api) |
+| `POST` | `/api/snapshots/anchor` | Insert/update a value-only anchor row to pin the return baseline |
+| `POST` | `/api/snapshots/backfill-returns` | Recompute all historical `portfolio_return_pct` from the earliest snapshot |
 | `GET` | `/api/benchmarks?days=N` | Benchmark history |
 | `POST` | `/api/collect` | Run a full snapshot now |
 | `POST` | `/api/approve/{as_of}` | Approve rebalance; `?execute=true` places live orders |
@@ -612,9 +624,197 @@ The add-on serves a REST API on port 8000.
 | `POST` | `/api/sync-t212-weights` | Reset stored target weights to current T212 actuals |
 | `GET` | `/api/groups` | List all instrument group assignments |
 | `POST` | `/api/groups/{ticker}` | Set group label; body `{"group":"momentum_core"}` |
+| `POST` | `/api/groups/{ticker}/tradeable` | Re-enable a ticker auto-flagged as untradeable; body `{"tradeable": true}` |
+| `GET` | `/api/t212/positions` | Pass-through of raw T212 portfolio positions |
+| `GET` | `/api/t212/pies` | List all T212 auto-invest pies on the account |
+| `GET` | `/api/t212/pie/{pie_id}` | Full pie detail including current `instrumentShares` |
+| `POST` | `/api/push-to-pie` | Manually push latest snapshot weights to the active pie |
 | `GET` | `/api/catalog/status` | Catalog cache age + count |
 | `POST` | `/api/catalog/refresh` | Force catalog re-fetch |
 | `GET` | `/api/last-good-targets` | Inspect the validator's recovery baseline |
+
+---
+
+## T212 Auto-Invest Pie workflow
+
+If your entire portfolio is held inside a T212 auto-invest pie, direct market orders on
+those instruments are rejected by T212. The collector detects this automatically and switches
+to **pie execution mode** — updating the pie's `instrumentShares` proportions instead of
+placing orders.
+
+### How it works
+
+1. At snapshot time, `pie_detected` is set in the snapshot metadata. The dashboard shows
+   **execution_mode: pie** and displays the pie ID.
+2. When you approve a rebalance with **execute=true**, the collector:
+   - Converts the suggested trade weights into normalised `instrumentShares` (must sum to 1.0)
+   - Calls `PUT /api/v0/equity/pies/{pie_id}` with the new shares **and** an incremented
+     version suffix in the pie name (e.g. `"My Portfolio v3"`)
+   - The name increment is a T212 API workaround — without a payload change beyond
+     `instrumentShares`, T212 sometimes silently ignores the update
+3. T212 progressively rebalances the pie toward the new target over subsequent sessions
+
+### Step-by-step: rebalancing a pie portfolio
+
+```bash
+# 1. Confirm pie is detected
+curl -s http://localhost:8000/api/latest-snapshot | python3 -c "
+import sys, json; d = json.load(sys.stdin)
+print('pie_detected:', d.get('pie_detected'))
+print('pie_id:      ', d.get('pie_id'))
+print('exec_mode:   ', d.get('execution_mode'))
+"
+
+# 2. List pies on the account (confirm the right one is active)
+curl -s http://localhost:8000/api/t212/pies | python3 -m json.tool
+
+# 3. Inspect the current pie weights
+curl -s http://localhost:8000/api/t212/pie/<pie_id> | python3 -m json.tool
+
+# 4. Run a snapshot to get fresh positions and trade plan
+curl -X POST http://localhost:8000/api/collect
+
+# 5. Review trade plan on the dashboard Rebalance tab, then approve + execute:
+curl -X POST "http://localhost:8000/api/approve/latest?execute=true"
+
+# 6. Verify the pie was updated (name should have incremented)
+curl -s http://localhost:8000/api/t212/pie/<pie_id> | python3 -c "
+import sys, json; d = json.load(sys.stdin)
+print('Pie name:', d['settings']['name'])
+for t, s in d.get('instrumentShares', {}).items():
+    print(f'  {t}: {s:.4f}')
+"
+
+# 7. Manually push weights without a full rebalance approval (emergency / test)
+curl -X POST http://localhost:8000/api/push-to-pie
+```
+
+### Configuration options
+
+| Option | Default | Description |
+|---|---|---|
+| `force_direct_orders_when_pie` | `false` | Set `true` to attempt direct orders even when a pie is detected. T212 will reject them for pie-held instruments — only useful if you have a mixed account. |
+| `rebalance_settle_seconds` | `5` | Seconds to wait between SELL leg and BUY leg. Irrelevant in pie mode (no two-phase execution), but applies when `force_direct_orders_when_pie: true`. |
+
+---
+
+## Database management via API
+
+The collector's SQLite database is inside the add-on container and not directly accessible
+from outside. All management is done through the REST API. All commands below run from
+inside HA's Terminal & SSH add-on, or any machine that can reach port 8000.
+
+### View portfolio value history
+
+```bash
+# Lightweight summary — just dates and values
+curl -s "http://localhost:8000/api/snapshots?summary=true" | python3 -m json.tool
+
+# Full history with return %
+curl -s "http://localhost:8000/api/snapshots?limit=90" | python3 -c "
+import sys, json
+rows = json.load(sys.stdin)
+print(f'{'Date':<25} {'Value (GBP)':>12} {'Return %':>10}')
+print('-' * 50)
+for r in rows:
+    print(f'{r[\"as_of\"]:<25} {r[\"portfolio_value\"]:>12.2f} {r.get(\"portfolio_return_pct\", 0):>10.2f}')
+"
+```
+
+### View benchmark history
+
+```bash
+curl -s "http://localhost:8000/api/benchmarks?days=30" | python3 -c "
+import sys, json
+rows = json.load(sys.stdin)
+for r in rows:
+    b = r['benchmarks']
+    msci = b.get('msci_world', {}).get('return_since_purchase', 'n/a')
+    sp   = b.get('sp500',      {}).get('return_since_purchase', 'n/a')
+    vix  = b.get('vix',        {}).get('latest', 'n/a')
+    print(f'{r[\"as_of\"][:10]}  MSCI={msci}%  SP500={sp}%  VIX={vix}')
+"
+```
+
+### Set a return baseline (anchor)
+
+Use this after a rebalance that resets T212's cost basis, or on a fresh install where you
+know what the portfolio was worth on day one.
+
+```bash
+# Insert a stub snapshot for a historical date with a known value
+curl -X POST http://localhost:8000/api/snapshots/anchor \
+  -H "Content-Type: application/json" \
+  -d '{"date": "2026-04-07", "value": 5000}'
+
+# With starting cash
+curl -X POST http://localhost:8000/api/snapshots/anchor \
+  -H "Content-Type: application/json" \
+  -d '{"date": "2026-04-07", "value": 5000, "cash": 0}'
+```
+
+The anchor row becomes the earliest snapshot in the DB. All subsequent `portfolio_return_pct`
+calculations use it as the baseline (rather than T212's cost basis, which resets on
+pie/rebalance updates).
+
+### Backfill historical return values
+
+After setting a new anchor, retrofit all existing snapshots so their stored
+`portfolio_return_pct` reflects the new baseline:
+
+```bash
+curl -X POST http://localhost:8000/api/snapshots/backfill-returns
+```
+
+Response confirms rows updated and the baseline used:
+```json
+{"updated": 24, "base_date": "2026-04-07T00:00:00+00:00", "base_value": 5000.0}
+```
+
+**Typical sequence after a rebalance resets your cost basis:**
+
+```bash
+# 1. Set the anchor to your known starting value
+curl -X POST http://localhost:8000/api/snapshots/anchor \
+  -H "Content-Type: application/json" \
+  -d '{"date": "2026-04-07", "value": 5000}'
+
+# 2. Backfill all historical return % in the DB
+curl -X POST http://localhost:8000/api/snapshots/backfill-returns
+
+# 3. Run a fresh snapshot so HA sensors pick up the corrected current return
+curl -X POST http://localhost:8000/api/collect
+```
+
+### Delete bad snapshots (spikes / corrupt data)
+
+```bash
+# Delete a specific date
+curl -X DELETE "http://localhost:8000/api/snapshots?date=2026-04-28"
+
+# Delete snapshots before a date
+curl -X DELETE "http://localhost:8000/api/snapshots?before=2026-04-01"
+
+# Delete rogue upward spikes above a threshold
+curl -X DELETE "http://localhost:8000/api/snapshots?max_value=7000"
+
+# Delete rogue downward spikes below a threshold
+curl -X DELETE "http://localhost:8000/api/snapshots?min_value=3000"
+
+# Combine filters — scoped to a date range
+curl -X DELETE "http://localhost:8000/api/snapshots?after=2026-04-01&max_value=7000"
+```
+
+The response lists every row that was deleted before removal, so you can verify:
+```json
+{
+  "deleted": 2,
+  "removed_rows": [
+    {"as_of": "2026-04-15T20:00:00+00:00", "portfolio_value": 45000.0},
+    {"as_of": "2026-04-22T20:00:00+00:00", "portfolio_value": 48000.0}
+  ]
+}
+```
 
 ---
 
