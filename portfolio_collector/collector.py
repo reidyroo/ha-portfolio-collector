@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portfolio Collector — Home Assistant Add-on v2.8.5
+Portfolio Collector — Home Assistant Add-on v2.8.6
 ===================================================
 Monitors a Trading 212 portfolio, computing drift from target weights,
 scoring momentum, benchmarking against major indices, and suggesting
@@ -1859,8 +1859,29 @@ def compute_snapshot() -> dict:
             log.warning(f"Could not persist last_good_targets: {exc}")
 
     max_drift_rel = max((abs(p["drift_rel"]) for p in positions), default=0.0)
-    total_cost    = sum(p["cost_basis"] for p in positions)
-    portfolio_return_pct = (total_value - total_cost) / total_cost * 100 if total_cost else 0.0
+
+    # Portfolio return — anchored to the earliest portfolio value in the DB so
+    # that rebalances / pie updates (which reset T212's cost basis) don't
+    # deflate the displayed return.  Falls back to cost basis only on the very
+    # first snapshot when no history exists yet.
+    _conn = get_db()
+    _earliest = _conn.execute(
+        "SELECT as_of, portfolio_value FROM snapshots ORDER BY as_of ASC LIMIT 1"
+    ).fetchone()
+    _conn.close()
+
+    if _earliest and _earliest["portfolio_value"]:
+        earliest_value = float(_earliest["portfolio_value"])
+        earliest_date  = _earliest["as_of"][:10]   # YYYY-MM-DD
+        portfolio_return_pct = (total_value - earliest_value) / earliest_value * 100
+    else:
+        # No prior snapshots — use T212 cost basis as a one-time fallback
+        total_cost = sum(p["cost_basis"] for p in positions)
+        portfolio_return_pct = (total_value - total_cost) / total_cost * 100 if total_cost else 0.0
+        earliest_date = cfg.get("purchase_date", "2026-04-07")
+
+    log.info(f"Portfolio return: {portfolio_return_pct:.2f}%  "
+             f"(baseline date={earliest_date}  value=£{_earliest['portfolio_value'] if _earliest else 'n/a'})")
 
     # Group summary
     group_summary: dict[str, dict] = {}
@@ -1871,17 +1892,17 @@ def compute_snapshot() -> dict:
         group_summary[g]["actual_wt"] = round(group_summary[g]["actual_wt"] + p["actual_wt"], 2)
         group_summary[g]["target_wt"] = round(group_summary[g]["target_wt"] + p["target_wt"], 2)
 
-    # Benchmarks
+    # Benchmarks — return_since_purchase aligned to the same earliest-DB date
+    # so portfolio and benchmark returns are always comparable.
     benchmarks   = {}
     world_series = hist.get("URTH")
-    purchase_date = cfg.get("purchase_date", "2026-04-07")
     for name, ticker in BENCHMARKS.items():
         if ticker not in hist.columns:
             continue
         s = hist[ticker].dropna()
         if s.empty:
             continue
-        since_purchase = _return_since_date(s, purchase_date)
+        since_purchase = _return_since_date(s, earliest_date)
         benchmarks[name] = {
             "ticker":                ticker,
             "latest":                round(float(s.iloc[-1]), 2),
@@ -3369,7 +3390,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     # Always advertise the running collector version so HA sensors / dashboards
     # can confirm the add-on actually upgraded after a Supervisor update.
-    d["collector_version"] = "2.8.5"
+    d["collector_version"] = "2.8.6"
     for f in ["positions_json", "benchmarks_json", "drift_json", "momentum_json", "suggested_actions"]:
         key = f.replace("_json", "")
         d[key] = json.loads(d.pop(f) or ("[]" if f == "suggested_actions" else "{}"))
@@ -3411,7 +3432,7 @@ if __name__ == "__main__":
     # and ensures the /groups page works behind the ingress proxy.
     ingress_path = os.getenv("INGRESS_PATH", "")
     log.info(
-    f"Portfolio Collector v2.8.5 — phase={cfg['portfolio_phase']} — "
+    f"Portfolio Collector v2.8.6 — phase={cfg['portfolio_phase']} — "
         f"weight_mode={cfg['weight_mode']} — "
         f"DB: {DB_PATH} — T212: {cfg['t212_base']} — ingress={ingress_path or 'none'}"
     )
