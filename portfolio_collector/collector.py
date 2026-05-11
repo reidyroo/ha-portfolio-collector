@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portfolio Collector — Home Assistant Add-on v2.8.7
+Portfolio Collector — Home Assistant Add-on v2.8.8
 ===================================================
 Monitors a Trading 212 portfolio, computing drift from target weights,
 scoring momentum, benchmarking against major indices, and suggesting
@@ -1859,6 +1859,7 @@ def compute_snapshot() -> dict:
             log.warning(f"Could not persist last_good_targets: {exc}")
 
     max_drift_rel = max((abs(p["drift_rel"]) for p in positions), default=0.0)
+    total_cost    = sum(p["cost_basis"] for p in positions)
 
     # Portfolio return — anchored to the earliest portfolio value in the DB so
     # that rebalances / pie updates (which reset T212's cost basis) don't
@@ -1876,7 +1877,6 @@ def compute_snapshot() -> dict:
         portfolio_return_pct = (total_value - earliest_value) / earliest_value * 100
     else:
         # No prior snapshots — use T212 cost basis as a one-time fallback
-        total_cost = sum(p["cost_basis"] for p in positions)
         portfolio_return_pct = (total_value - total_cost) / total_cost * 100 if total_cost else 0.0
         earliest_date = cfg.get("purchase_date", "2026-04-07")
 
@@ -3441,7 +3441,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     # Always advertise the running collector version so HA sensors / dashboards
     # can confirm the add-on actually upgraded after a Supervisor update.
-    d["collector_version"] = "2.8.7"
+    d["collector_version"] = "2.8.8"
     for f in ["positions_json", "benchmarks_json", "drift_json", "momentum_json", "suggested_actions"]:
         key = f.replace("_json", "")
         d[key] = json.loads(d.pop(f) or ("[]" if f == "suggested_actions" else "{}"))
@@ -3483,7 +3483,7 @@ if __name__ == "__main__":
     # and ensures the /groups page works behind the ingress proxy.
     ingress_path = os.getenv("INGRESS_PATH", "")
     log.info(
-    f"Portfolio Collector v2.8.7 — phase={cfg['portfolio_phase']} — "
+    f"Portfolio Collector v2.8.8 — phase={cfg['portfolio_phase']} — "
         f"weight_mode={cfg['weight_mode']} — "
         f"DB: {DB_PATH} — T212: {cfg['t212_base']} — ingress={ingress_path or 'none'}"
     )
