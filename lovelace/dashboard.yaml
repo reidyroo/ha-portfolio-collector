@@ -113,6 +113,11 @@ views:
                   total:
                     show: true
                     label: "Invested"
+                    formatter: |
+                      function(w) {
+                        var sum = w.globals.seriesTotals.reduce(function(a, b) { return a + b; }, 0);
+                        return Math.round(sum) + '%';
+                      }
 
       # ── Portfolio value history ───────────────────────────────────────────
       - type: custom:apexcharts-card
