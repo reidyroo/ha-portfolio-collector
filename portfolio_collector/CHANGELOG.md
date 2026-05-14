@@ -4,6 +4,17 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [2.9.3] — 2026-05-14
+
+### Fixed
+- **Chart N/A and zoom cursor** — `apex_config: xaxis: min: ~` (YAML null)
+  caused ApexCharts to treat the x-axis minimum as epoch 0 (1970), breaking
+  the time-range calculation for all four history charts (Portfolio Value,
+  Return History, Alpha History, VIX).  Removed the blocks; apexcharts-card
+  auto-detects the window from `graph_span` correctly without them.
+
+---
+
 ## [2.9.2] — 2026-05-14
 
 ### Fixed
