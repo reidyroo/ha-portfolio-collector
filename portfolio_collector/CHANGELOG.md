@@ -4,6 +4,19 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [2.9.8] — 2026-05-14
+
+### Fixed
+- **Chart start date now actually works** — `apex_config: xaxis: min` is overridden
+  by apexcharts-card's internal time-range management and was being ignored.
+  Switched all four history charts to use `span: start/end` instead of `graph_span`,
+  which is the correct apexcharts-card mechanism for controlling the displayed range.
+  `span.start` is a Jinja2 template that returns `purchase_date` while the portfolio
+  is under 90 days old, then automatically switches to `now - 90d` so the rolling
+  window kicks in without any config change.
+
+---
+
 ## [2.9.7] — 2026-05-14
 
 ### Changed

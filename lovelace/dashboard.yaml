@@ -125,11 +125,13 @@ views:
           show: true
           title: Portfolio Value
           show_states: true
-        graph_span: 90d
+        span:
+          start: >-
+            {% set pd = state_attr('sensor.portfolio_snapshot', 'purchase_date') or '2026-04-07' %}{% set age = ((now().timestamp() - as_timestamp(pd)) / 86400) | int %}{% if age < 90 %}{{ pd }}{% else %}{{ (now() - timedelta(days=90)).strftime('%Y-%m-%d') }}{% endif %}
+          end: now
         apex_config:
           xaxis:
             tickAmount: 6
-            min: "{{ states('sensor.portfolio_chart_start_ms') | int }}"
         series:
           - entity: sensor.portfolio_value
             name: Portfolio (GBP)
@@ -142,11 +144,13 @@ views:
           show: true
           title: Return History (%)
           show_states: true
-        graph_span: 90d
+        span:
+          start: >-
+            {% set pd = state_attr('sensor.portfolio_snapshot', 'purchase_date') or '2026-04-07' %}{% set age = ((now().timestamp() - as_timestamp(pd)) / 86400) | int %}{% if age < 90 %}{{ pd }}{% else %}{{ (now() - timedelta(days=90)).strftime('%Y-%m-%d') }}{% endif %}
+          end: now
         apex_config:
           xaxis:
             tickAmount: 6
-            min: "{{ states('sensor.portfolio_chart_start_ms') | int }}"
         series:
           - entity: sensor.portfolio_return
             name: Portfolio
@@ -452,11 +456,13 @@ views:
           show: true
           title: Alpha History (%)
           show_states: true
-        graph_span: 90d
+        span:
+          start: >-
+            {% set pd = state_attr('sensor.portfolio_snapshot', 'purchase_date') or '2026-04-07' %}{% set age = ((now().timestamp() - as_timestamp(pd)) / 86400) | int %}{% if age < 90 %}{{ pd }}{% else %}{{ (now() - timedelta(days=90)).strftime('%Y-%m-%d') }}{% endif %}
+          end: now
         apex_config:
           xaxis:
             tickAmount: 6
-            min: "{{ states('sensor.portfolio_chart_start_ms') | int }}"
         series:
           - entity: sensor.portfolio_alpha_sp500
             name: vs S&P 500
@@ -472,11 +478,13 @@ views:
           show: true
           title: VIX
           show_states: true
-        graph_span: 90d
+        span:
+          start: >-
+            {% set pd = state_attr('sensor.portfolio_snapshot', 'purchase_date') or '2026-04-07' %}{% set age = ((now().timestamp() - as_timestamp(pd)) / 86400) | int %}{% if age < 90 %}{{ pd }}{% else %}{{ (now() - timedelta(days=90)).strftime('%Y-%m-%d') }}{% endif %}
+          end: now
         apex_config:
           xaxis:
             tickAmount: 6
-            min: "{{ states('sensor.portfolio_chart_start_ms') | int }}"
         series:
           - entity: sensor.vix_level
             name: VIX
