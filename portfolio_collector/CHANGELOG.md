@@ -4,6 +4,21 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [2.9.2] — 2026-05-14
+
+### Fixed
+- **Donut chart N/A** — group-weight template sensors (`portfolio_group_weight_*`)
+  had `unique_id` values with a `_2` suffix.  When HA already held the base
+  entity-ids from a previous install the new definitions were registered as
+  `sensor.portfolio_group_weight_*_2`, a different entity-id from what the
+  dashboard donut chart referenced, causing all five segments to show N/A.
+  Reverted unique_ids to canonical names; a HA Core restart after syncing
+  `packages/portfolio.yaml` resolves the mapping.
+- **Stale `2.7.3` version strings** in `collector.py` (`FastAPI` constructor,
+  snapshot dict, health endpoint) updated to match the running version.
+
+---
+
 ## [2.0.0] — 2026-05-01
 
 ### Changed — breaking
