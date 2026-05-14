@@ -126,8 +126,7 @@ views:
           title: Portfolio Value
           show_states: true
         span:
-          start: >-
-            {% set pd = state_attr('sensor.portfolio_snapshot', 'purchase_date') or '2026-04-07' %}{% set age = ((now().timestamp() - as_timestamp(pd)) / 86400) | int %}{% if age < 90 %}{{ pd }}{% else %}{{ (now() - timedelta(days=90)).strftime('%Y-%m-%d') }}{% endif %}
+          start: "2026-04-07"
           end: now
         apex_config:
           xaxis:
@@ -145,8 +144,7 @@ views:
           title: Return History (%)
           show_states: true
         span:
-          start: >-
-            {% set pd = state_attr('sensor.portfolio_snapshot', 'purchase_date') or '2026-04-07' %}{% set age = ((now().timestamp() - as_timestamp(pd)) / 86400) | int %}{% if age < 90 %}{{ pd }}{% else %}{{ (now() - timedelta(days=90)).strftime('%Y-%m-%d') }}{% endif %}
+          start: "2026-04-07"
           end: now
         apex_config:
           xaxis:
@@ -457,8 +455,7 @@ views:
           title: Alpha History (%)
           show_states: true
         span:
-          start: >-
-            {% set pd = state_attr('sensor.portfolio_snapshot', 'purchase_date') or '2026-04-07' %}{% set age = ((now().timestamp() - as_timestamp(pd)) / 86400) | int %}{% if age < 90 %}{{ pd }}{% else %}{{ (now() - timedelta(days=90)).strftime('%Y-%m-%d') }}{% endif %}
+          start: "2026-04-07"
           end: now
         apex_config:
           xaxis:
@@ -479,8 +476,7 @@ views:
           title: VIX
           show_states: true
         span:
-          start: >-
-            {% set pd = state_attr('sensor.portfolio_snapshot', 'purchase_date') or '2026-04-07' %}{% set age = ((now().timestamp() - as_timestamp(pd)) / 86400) | int %}{% if age < 90 %}{{ pd }}{% else %}{{ (now() - timedelta(days=90)).strftime('%Y-%m-%d') }}{% endif %}
+          start: "2026-04-07"
           end: now
         apex_config:
           xaxis:

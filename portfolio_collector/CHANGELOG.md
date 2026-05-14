@@ -4,6 +4,18 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [2.9.9] — 2026-05-14
+
+### Fixed
+- **Configuration error from Jinja2 in span.start** — apexcharts-card processes
+  `span.start` in JavaScript, not through HA's template engine, so the Jinja2
+  template introduced in 2.9.8 was passed as a literal string and failed date
+  parsing.  Replaced with a static `"2026-04-07"` date string.  The chart grows
+  from purchase date; when the portfolio reaches 90 days old (2026-07-06) swap
+  `span` for `graph_span: 90d` to switch to a rolling window.
+
+---
+
 ## [2.9.8] — 2026-05-14
 
 ### Fixed
