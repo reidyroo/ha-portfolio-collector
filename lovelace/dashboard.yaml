@@ -126,6 +126,10 @@ views:
           title: Portfolio Value
           show_states: true
         graph_span: 90d
+        apex_config:
+          xaxis:
+            tickAmount: 6
+            min: 1775520000000
         series:
           - entity: sensor.portfolio_value
             name: Portfolio (GBP)
@@ -139,6 +143,10 @@ views:
           title: Return History (%)
           show_states: true
         graph_span: 90d
+        apex_config:
+          xaxis:
+            tickAmount: 6
+            min: 1775520000000
         series:
           - entity: sensor.portfolio_return
             name: Portfolio
@@ -448,6 +456,7 @@ views:
         apex_config:
           xaxis:
             tickAmount: 6
+            min: 1775520000000
         series:
           - entity: sensor.portfolio_alpha_sp500
             name: vs S&P 500
@@ -467,6 +476,7 @@ views:
         apex_config:
           xaxis:
             tickAmount: 6
+            min: 1775520000000
         series:
           - entity: sensor.vix_level
             name: VIX

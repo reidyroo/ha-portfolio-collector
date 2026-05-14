@@ -4,6 +4,18 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [2.9.6] — 2026-05-14
+
+### Fixed
+- **Chart x-axis anchored to purchase date** — all four history charts (Portfolio
+  Value, Return History, Alpha History, VIX) now set `apex_config: xaxis: min` to
+  the portfolio purchase date (2026-04-07, epoch `1775520000000`).  For the first
+  90 days the chart starts at April 7 and grows rightward; once the rolling 90-day
+  window moves past that date the anchor becomes irrelevant and the charts
+  automatically switch to a standard 90-day rolling view.
+
+---
+
 ## [2.9.5] — 2026-05-14
 
 ### Fixed
