@@ -131,9 +131,6 @@ views:
             name: Portfolio (GBP)
             color: "#00E676"
             stroke_width: 3
-        apex_config:
-          xaxis:
-            min: ~
 
       # ── Return history (portfolio vs benchmarks) ──────────────────────────
       - type: custom:apexcharts-card
@@ -163,9 +160,6 @@ views:
             name: DOW
             color: "#FF5252"
             stroke_width: 2
-        apex_config:
-          xaxis:
-            min: ~
 
 
   # ═══════════════════════════════
@@ -460,9 +454,6 @@ views:
             name: vs MSCI World
             color: "#40C4FF"
             stroke_width: 3
-        apex_config:
-          xaxis:
-            min: ~
 
       - type: custom:apexcharts-card
         header:
@@ -477,9 +468,6 @@ views:
             stroke_width: 3
             fill_raw: zero
             opacity: 0.2
-        apex_config:
-          xaxis:
-            min: ~
 
       - type: glance
         title: Returns Since Purchase (%)
