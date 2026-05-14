@@ -80,6 +80,7 @@ views:
       # ── Group allocation donut ────────────────────────────────────────────
       - type: custom:apexcharts-card
         chart_type: donut
+        ignore_history: true
         header:
           show: true
           title: Portfolio Composition — by Group (actual %)

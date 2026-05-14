@@ -4,6 +4,16 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [2.9.11] — 2026-05-14
+
+### Fixed
+- **Donut chart spinner** — apexcharts-card was querying the HA recorder for
+  historical data on all 5 group-weight sensors before rendering the donut, causing
+  a visible loading delay on every page load.  Added `ignore_history: true` to the
+  Portfolio Composition card so it reads current sensor state only.
+
+---
+
 ## [2.9.10] — 2026-05-14
 
 ### Fixed
