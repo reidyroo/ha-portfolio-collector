@@ -4,6 +4,18 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [2.9.4] — 2026-05-14
+
+### Fixed
+- **Portfolio Composition donut restored** — reverted erroneous removal of
+  `_2` suffix from group-weight sensor `unique_id` values.  The suffix was
+  intentional: those entities were already registered in HA under
+  `sensor.portfolio_group_weight_*` (entity_id derived from name) and
+  stripping the suffix orphaned them, causing the donut to show 0% for all
+  groups.  The `_2` unique_ids are restored and the entities remain stable.
+
+---
+
 ## [2.9.3] — 2026-05-14
 
 ### Fixed
