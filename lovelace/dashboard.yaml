@@ -123,45 +123,49 @@ views:
       - type: custom:apexcharts-card
         header:
           show: true
-          title: Portfolio Value — 90 days
+          title: Portfolio Value
           show_states: true
         graph_span: 90d
         series:
           - entity: sensor.portfolio_value
             name: Portfolio (GBP)
-            color: "#4CAF50"
-            stroke_width: 2
-            fill_raw: zero
-            opacity: 0.15
+            color: "#00E676"
+            stroke_width: 3
+        apex_config:
+          xaxis:
+            min: ~
 
       # ── Return history (portfolio vs benchmarks) ──────────────────────────
       - type: custom:apexcharts-card
         header:
           show: true
-          title: Return History — 90 days (%)
+          title: Return History (%)
           show_states: true
         graph_span: 90d
         series:
           - entity: sensor.portfolio_return
             name: Portfolio
-            color: "#4CAF50"
+            color: "#00E676"
             stroke_width: 3
           - entity: sensor.msci_world_return_1m
             name: MSCI World
-            color: "#2196F3"
+            color: "#40C4FF"
             stroke_width: 2
           - entity: sensor.sp500_return_1m
             name: S&P 500
-            color: "#FF9800"
+            color: "#FFB300"
             stroke_width: 2
           - entity: sensor.ftse100_return_1m
             name: FTSE 100
-            color: "#9C27B0"
+            color: "#E040FB"
             stroke_width: 2
           - entity: sensor.dow_return_1m
             name: DOW
-            color: "#F44336"
+            color: "#FF5252"
             stroke_width: 2
+        apex_config:
+          xaxis:
+            min: ~
 
 
   # ═══════════════════════════════
@@ -444,35 +448,38 @@ views:
       - type: custom:apexcharts-card
         header:
           show: true
-          title: Alpha History — 90 days (%)
+          title: Alpha History (%)
+          show_states: true
         graph_span: 90d
         series:
           - entity: sensor.portfolio_alpha_sp500
             name: vs S&P 500
-            color: "#FF9800"
-            stroke_width: 2
-            fill_raw: zero
-            opacity: 0.15
+            color: "#FFB300"
+            stroke_width: 3
           - entity: sensor.portfolio_alpha_msci
             name: vs MSCI World
-            color: "#2196F3"
-            stroke_width: 2
-            fill_raw: zero
-            opacity: 0.15
+            color: "#40C4FF"
+            stroke_width: 3
+        apex_config:
+          xaxis:
+            min: ~
 
       - type: custom:apexcharts-card
         header:
           show: true
-          title: VIX — 90 days
+          title: VIX
           show_states: true
         graph_span: 90d
         series:
           - entity: sensor.vix_level
             name: VIX
-            color: "#FF5722"
-            stroke_width: 2
+            color: "#FF1744"
+            stroke_width: 3
             fill_raw: zero
-            opacity: 0.1
+            opacity: 0.2
+        apex_config:
+          xaxis:
+            min: ~
 
       - type: glance
         title: Returns Since Purchase (%)
