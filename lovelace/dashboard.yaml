@@ -445,6 +445,9 @@ views:
           title: Alpha History (%)
           show_states: true
         graph_span: 90d
+        apex_config:
+          xaxis:
+            tickAmount: 6
         series:
           - entity: sensor.portfolio_alpha_sp500
             name: vs S&P 500
@@ -461,13 +464,16 @@ views:
           title: VIX
           show_states: true
         graph_span: 90d
+        apex_config:
+          xaxis:
+            tickAmount: 6
         series:
           - entity: sensor.vix_level
             name: VIX
             color: "#FF1744"
             stroke_width: 3
             fill_raw: zero
-            opacity: 0.2
+            opacity: 0.55
 
       - type: glance
         title: Returns Since Purchase (%)

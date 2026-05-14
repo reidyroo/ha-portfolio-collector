@@ -4,6 +4,18 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [2.9.5] — 2026-05-14
+
+### Fixed
+- **Benchmarks tab x-axis** — Alpha History and VIX charts now render 6 evenly-spaced
+  tick marks distributed across the full available width (`apex_config: xaxis:
+  tickAmount: 6`), replacing the irregular calendar-driven ticks that clustered dates.
+- **VIX chart fill visibility** — increased area-fill `opacity` from `0.2` to `0.55`
+  so the red fill is clearly visible and the dashed grid lines no longer appear to
+  render in front of the series.
+
+---
+
 ## [2.9.4] — 2026-05-14
 
 ### Fixed
