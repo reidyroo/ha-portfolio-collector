@@ -345,6 +345,12 @@ template:
           {% set snap = state_attr('sensor.portfolio_snapshot', 'group_summary') %}
           {{ snap.optional_factor.actual_wt | round(1) if snap and 'optional_factor' in snap else 0 }}
 
+      - name: "Portfolio Chart Start Ms"
+        unique_id: portfolio_chart_start_ms
+        state: >
+          {% set pd = state_attr('sensor.portfolio_snapshot', 'purchase_date') %}
+          {{ (as_timestamp(pd) * 1000) | int if pd else 0 }}
+
 
 # ── REST commands ────────────────────────────────────────────────────────────
 rest_command:

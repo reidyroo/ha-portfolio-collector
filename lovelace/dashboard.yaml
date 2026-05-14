@@ -129,7 +129,7 @@ views:
         apex_config:
           xaxis:
             tickAmount: 6
-            min: 1775520000000
+            min: "{{ states('sensor.portfolio_chart_start_ms') | int }}"
         series:
           - entity: sensor.portfolio_value
             name: Portfolio (GBP)
@@ -146,7 +146,7 @@ views:
         apex_config:
           xaxis:
             tickAmount: 6
-            min: 1775520000000
+            min: "{{ states('sensor.portfolio_chart_start_ms') | int }}"
         series:
           - entity: sensor.portfolio_return
             name: Portfolio
@@ -456,7 +456,7 @@ views:
         apex_config:
           xaxis:
             tickAmount: 6
-            min: 1775520000000
+            min: "{{ states('sensor.portfolio_chart_start_ms') | int }}"
         series:
           - entity: sensor.portfolio_alpha_sp500
             name: vs S&P 500
@@ -476,7 +476,7 @@ views:
         apex_config:
           xaxis:
             tickAmount: 6
-            min: 1775520000000
+            min: "{{ states('sensor.portfolio_chart_start_ms') | int }}"
         series:
           - entity: sensor.vix_level
             name: VIX

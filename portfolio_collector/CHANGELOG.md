@@ -4,6 +4,18 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [2.9.7] — 2026-05-14
+
+### Changed
+- **Chart start date reads from config** — `purchase_date` is now included in the
+  snapshot response.  A new `sensor.portfolio_chart_start_ms` template sensor
+  converts it to epoch milliseconds, and all four history charts reference that
+  sensor via `apex_config: xaxis: min` instead of a hardcoded timestamp.  Changing
+  `purchase_date` in the add-on config takes effect on the next collect without
+  touching the dashboard.
+
+---
+
 ## [2.9.6] — 2026-05-14
 
 ### Fixed
