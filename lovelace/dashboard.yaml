@@ -125,9 +125,7 @@ views:
           show: true
           title: Portfolio Value
           show_states: true
-        span:
-          start: "2026-04-07"
-          end: now
+        graph_span: 90d
         apex_config:
           xaxis:
             tickAmount: 6
@@ -143,9 +141,7 @@ views:
           show: true
           title: Return History (%)
           show_states: true
-        span:
-          start: "2026-04-07"
-          end: now
+        graph_span: 90d
         apex_config:
           xaxis:
             tickAmount: 6
@@ -454,9 +450,7 @@ views:
           show: true
           title: Alpha History (%)
           show_states: true
-        span:
-          start: "2026-04-07"
-          end: now
+        graph_span: 90d
         apex_config:
           xaxis:
             tickAmount: 6
@@ -475,9 +469,7 @@ views:
           show: true
           title: VIX
           show_states: true
-        span:
-          start: "2026-04-07"
-          end: now
+        graph_span: 90d
         apex_config:
           xaxis:
             tickAmount: 6

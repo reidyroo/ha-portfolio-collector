@@ -4,6 +4,16 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [2.9.10] — 2026-05-14
+
+### Fixed
+- **Configuration errors resolved** — `span.start` only accepts keywords (`day`,
+  `week`, `month`, `year`), not arbitrary date strings. Reverted all four charts
+  to `graph_span: 90d`. The left side of the chart will show empty space until 90
+  days of data has accumulated; x-axis tick spacing (`tickAmount: 6`) is retained.
+
+---
+
 ## [2.9.9] — 2026-05-14
 
 ### Fixed
