@@ -4,6 +4,16 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [2.9.12] — 2026-05-14
+
+### Fixed
+- **Donut configuration error** — `ignore_history: true` is not valid on
+  `chart_type: donut` and caused a configuration error. Reverted. The brief
+  loading spinner on the donut is a known apexcharts-card behaviour for donut
+  charts and is not configurable without switching to a different card type.
+
+---
+
 ## [2.9.11] — 2026-05-14
 
 ### Fixed
