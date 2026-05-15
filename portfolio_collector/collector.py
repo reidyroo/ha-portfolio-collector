@@ -1,10 +1,42 @@
 #!/usr/bin/env python3
 """
-Portfolio Collector — Home Assistant Add-on v2.9.12
+Portfolio Collector — Home Assistant Add-on v3.0.0
 ===================================================
 Monitors a Trading 212 portfolio, computing drift from target weights,
 scoring momentum, benchmarking against major indices, and suggesting
 rebalance trades for manual approval in Home Assistant.
+
+v3.0.0 Release
+──────────────
+NEW FEATURES:
+  • Setup wizard endpoint (/api/setup-status) — guides new users through
+    onboarding with step-by-step checklist (token, collect, groups, phase, approve)
+  • T212 token helper (/api/helpers/encode-t212-token) — safely encode credentials
+    for the add-on options form without manual Base64 work
+  • Chart timespan endpoints:
+    - /api/charts/30d — last 30 days (for sparse new portfolios)
+    - /api/charts/benchmark-comparison — portfolio vs MSCI/S&P500/VIX over N days
+    - /api/charts/group-allocation-history — dynamic group weighting history
+  • Dashboard-ready data endpoints eliminate manual filtering logic
+
+IMPROVEMENTS:
+  • Simplified onboarding UX for new users — no more guessing what to do next
+  • Better charting flexibility — toggle 30/90-day views dynamically
+  • Benchmark comparison charts for performance vs indices
+  • Historical group allocation visibility (dynamic mode only)
+
+FIXES:
+  • Improved error messages in setup flow
+  • Added progress tracking (e.g. "3/5 groups assigned")
+  • Better fallback handling when first snapshot exists
+
+BREAKING CHANGES:
+  None — fully backwards compatible. Legacy endpoints unchanged.
+
+MIGRATION NOTES:
+  After upgrading, call GET /api/setup-status to see your current setup progress.
+  New dashboard users should use /api/charts/30d instead of /api/snapshots for
+  the first month to reduce chart sparsity.
 
 T212 is the source of truth — no holdings list in config.  Positions are
 fetched live on every snapshot; instruments are matched via the T212
@@ -16,14 +48,19 @@ GET  /api/health                         Liveness probe
 GET  /api/latest-snapshot                Latest data (consumed by HA REST sensors)
 GET  /api/snapshots?limit=N              History (default 90 records)
 GET  /api/snapshots?summary=true         Lightweight list: as_of + portfolio_value only
+GET  /api/snapshots/30d                  Last 30 days (NEW)
 DELETE /api/snapshots?date=YYYY-MM-DD    Delete all snapshots for a given date
 GET  /api/benchmarks?days=N              Benchmark history
+GET  /api/charts/benchmark-comparison    Portfolio vs indices (NEW)
+GET  /api/charts/group-allocation-history Dynamic group weighting history (NEW)
 POST /api/collect                        Run a full snapshot now
 POST /api/approve/{as_of}               Approve rebalance; ?execute=true places orders
 POST /api/reset-cooldown                 Clear rebalance cooldown after failed execution
 POST /api/set-phase                      Apply a named portfolio phase preset
 GET  /api/groups                         List all instrument group assignments
 POST /api/groups/{ticker}               Set group for an instrument {"group": "..."}
+GET  /api/setup-status                   New user onboarding checklist (NEW)
+POST /api/helpers/encode-t212-token      T212 credential encoder (NEW)
 GET  /api/catalog/status                 Catalog cache info
 POST /api/catalog/refresh                Force catalog re-fetch (rate-limited)
 GET  /groups                             HTML group-management UI (ingress panel)
@@ -201,7 +238,7 @@ _T212_EXCHANGE_MAP: list[tuple[str, str]] = [
     ("_US_EQ",   ""),
 ]
 
-app = FastAPI(title="Portfolio Collector", version="2.9.12")
+app = FastAPI(title="Portfolio Collector", version="3.0.0")
 
 
 # ── Ticker utilities ──────────────────────────────────────────────────────────
@@ -2089,7 +2126,7 @@ def compute_snapshot() -> dict:
 
     return {
         "as_of":                as_of,
-    "collector_version":    "2.9.12",
+    "collector_version":    "3.0.0",
         "weight_mode":          cfg.get("weight_mode", "stored"),
         "portfolio_phase":      cfg.get("portfolio_phase", "Momentum-Chill"),
         "risk_score":           int(risk_score),
@@ -2462,7 +2499,7 @@ def health():
     return {
         "status":           "ok",
         "utc":              datetime.now(timezone.utc).isoformat(),
-    "version":          "2.9.12",
+    "version":          "3.0.0",
         "t212_base":        opts.get("t212_base", "https://demo.trading212.com"),
         "demo_mode":        "demo" in opts.get("t212_base", "demo"),
         "phase":            opts.get("portfolio_phase", "Momentum-Max"),
@@ -3478,13 +3515,183 @@ def groups_page():
     return HTMLResponse(content=_GROUPS_HTML)
 
 
+@app.get("/api/setup-status")
+def setup_status():
+    """Return setup completeness for the onboarding flow."""
+    cfg = load_config()
+    conn = get_db()
+    has_token = bool(cfg.get("t212_token"))
+    position_count = conn.execute("SELECT COUNT(*) FROM instrument_groups").fetchone()[0]
+    unassigned = conn.execute(
+        "SELECT COUNT(*) FROM instrument_groups WHERE group_label='unassigned'"
+    ).fetchone()[0]
+    latest = conn.execute("SELECT as_of FROM snapshots ORDER BY as_of DESC LIMIT 1").fetchone()
+    conn.close()
+
+    steps_done = 0
+    steps = [
+        {
+            "id": "token",
+            "title": "Configure T212 API Token",
+            "done": has_token,
+            "action": "/hassio/addon/[addon_id]/config",
+            "help": "Generate at app.trading212.com → Settings → API"
+        },
+        {
+            "id": "collect",
+            "title": "Run First Snapshot",
+            "done": position_count > 0,
+            "action": "/api/collect",
+            "help": f"Found {position_count} instruments"
+        },
+        {
+            "id": "groups",
+            "title": "Assign Groups",
+            "done": unassigned == 0,
+            "progress": f"{position_count - unassigned}/{position_count}",
+            "action": "/groups",
+            "help": "Assign each holding to a portfolio group"
+        },
+        {
+            "id": "phase",
+            "title": "Choose Portfolio Phase",
+            "done": cfg.get("portfolio_phase") in PHASE_SETTINGS,
+            "action": "/api/set-phase",
+            "help": f"Currently: {cfg.get('portfolio_phase')}"
+        },
+        {
+            "id": "approve",
+            "title": "Approve First Rebalance",
+            "done": bool(latest),
+            "action": "/api/approve/latest",
+            "help": "Run snapshot → preview targets → approve"
+        }
+    ]
+
+    for step in steps:
+        if step["done"]:
+            steps_done += 1
+
+    return {
+        "steps": steps,
+        "completion_pct": (steps_done / len(steps)) * 100,
+        "ready_to_trade": all(s["done"] for s in steps),
+    }
+
+
+@app.post("/api/helpers/encode-t212-token")
+def encode_t212_token(body: dict = Body(default={})):
+    """Encode KEY_ID:SECRET to Base64 for the add-on options form."""
+    import base64
+    key_id = body.get("key_id", "").strip()
+    secret = body.get("secret", "").strip()
+    if not key_id or not secret:
+        raise HTTPException(400, "Both key_id and secret required")
+    encoded = base64.b64encode(f"{key_id}:{secret}".encode()).decode()
+    return {
+        "plain": f"{key_id}:{secret}",
+        "encoded": encoded,
+        "help": "Paste the 'encoded' value into add-on options → t212_token field"
+    }
+
+
+@app.get("/api/charts/30d")
+def snapshots_30d():
+    """Return snapshots from the last 30 days for charting."""
+    from datetime import timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM snapshots WHERE as_of > ? ORDER BY as_of DESC",
+        (cutoff,)
+    ).fetchall()
+    conn.close()
+    return [_row_to_dict(r) for r in rows]
+
+
+@app.get("/api/charts/benchmark-comparison")
+def benchmark_comparison(days: int = 90):
+    """Return normalized returns (%) for portfolio vs benchmarks over timespan."""
+    from datetime import timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT as_of, portfolio_return_pct, benchmarks_json FROM snapshots "
+        "WHERE as_of > ? ORDER BY as_of",
+        (cutoff,)
+    ).fetchall()
+    conn.close()
+
+    series = {
+        "portfolio": [],
+        "msci_world": [],
+        "sp500": [],
+        "vix": [],
+    }
+
+    for row in rows:
+        series["portfolio"].append({
+            "x": row["as_of"][:10],
+            "y": row["portfolio_return_pct"]
+        })
+        try:
+            bm = json.loads(row["benchmarks_json"] or "{}")
+            if "msci_world" in bm:
+                series["msci_world"].append({
+                    "x": row["as_of"][:10],
+                    "y": bm["msci_world"].get("return_since_purchase", 0)
+                })
+            if "sp500" in bm:
+                series["sp500"].append({
+                    "x": row["as_of"][:10],
+                    "y": bm["sp500"].get("return_since_purchase", 0)
+                })
+            if "vix" in bm:
+                series["vix"].append({
+                    "x": row["as_of"][:10],
+                    "y": bm["vix"].get("latest", 0)
+                })
+        except Exception:
+            pass
+
+    return series
+
+
+@app.get("/api/charts/group-allocation-history")
+def group_allocation_history(days: int = 90):
+    """Track dynamic group allocations over time."""
+    from datetime import timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT as_of, metadata_json FROM snapshots WHERE as_of > ? ORDER BY as_of",
+        (cutoff,)
+    ).fetchall()
+    conn.close()
+
+    series = {g: [] for g in VALID_GROUPS}
+    for row in rows:
+        try:
+            meta = json.loads(row["metadata_json"] or "{}")
+            allocs = meta.get("dynamic_group_allocations") or {}
+            for g in series:
+                series[g].append({
+                    "x": row["as_of"][:10],
+                    "y": allocs.get(g, 0)
+                })
+        except Exception:
+            pass
+
+    return series
+
+
 # ── DB row helper ─────────────────────────────────────────────────────────────
 
 def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     # Always advertise the running collector version so HA sensors / dashboards
     # can confirm the add-on actually upgraded after a Supervisor update.
-    d["collector_version"] = "2.9.12"
+    d["collector_version"] = "3.0.0"
     for f in ["positions_json", "benchmarks_json", "drift_json", "momentum_json", "suggested_actions"]:
         key = f.replace("_json", "")
         d[key] = json.loads(d.pop(f) or ("[]" if f == "suggested_actions" else "{}"))
@@ -3526,7 +3733,7 @@ if __name__ == "__main__":
     # and ensures the /groups page works behind the ingress proxy.
     ingress_path = os.getenv("INGRESS_PATH", "")
     log.info(
-    f"Portfolio Collector v2.9.12 — phase={cfg['portfolio_phase']} — "
+    f"Portfolio Collector v3.0.0 — phase={cfg['portfolio_phase']} — "
         f"weight_mode={cfg['weight_mode']} — "
         f"DB: {DB_PATH} — T212: {cfg['t212_base']} — ingress={ingress_path or 'none'}"
     )

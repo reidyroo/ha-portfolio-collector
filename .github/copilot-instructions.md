@@ -12,6 +12,12 @@
   - Group assignment uses `input_select.portfolio_assign_instrument` options formatted as `SYMBOL (TICKER)` and `rest_command.assign_instrument_group` extracts the ticker by parsing that string.
   - `approve_and_execute_rebalance` uses `latest` in the URL to avoid stale HA sensor cache issues.
   - `packages/portfolio.yaml` binds HA automations to local add-on REST endpoints; changes in the add-on usually require syncing package/dashboard YAML too.
+- **v3.0.0 New Features (May 2026):**
+  - `/api/setup-status` — onboarding checklist for new users (completion %, step-by-step guidance)
+  - `/api/helpers/encode-t212-token` — safely encode credentials without manual Base64
+  - `/api/charts/30d` — last 30 days (sparse-portfolio friendly)
+  - `/api/charts/benchmark-comparison` — portfolio vs MSCI/S&P500/VIX returns
+  - `/api/charts/group-allocation-history` — dynamic risk adjustment tracking
 - Development workflow:
   - Rebuild the add-on via HA Supervisor: `ha addons rebuild <addon_id>` and `ha addons restart <addon_id>`.
   - Verify the running add-on with `curl -s http://localhost:8000/api/health`.
@@ -20,6 +26,7 @@
   - **Version bumping (required for HA add-on refresh to pick up updates):**
     - HA checks the version field in `/config.yaml` (the add-on manifest in the repo root) and `/portfolio_collector/config.yaml` (the internal config schema)
     - Both **must** be bumped together to the same version number for updates to propagate
-    - Also update the collector module docstring at the top of `portfolio_collector/collector.py` (e.g., `v2.7.4`)
+    - Also update the collector module docstring at the top of `portfolio_collector/collector.py` (e.g., `v3.0.0`)
     - Commit and push to GitHub — HA's add-on marketplace will detect the new version within minutes
+    - **For major version bumps (e.g. 2.x → 3.0.0):** create a `RELEASE_NOTES.md` documenting new features, breaking changes (if any), and migration guidance
 - Note: `t212_token` must be a Base64 encoding of `KEY_ID:SECRET` and is loaded from the HA add-on options file. `t212_base` defaults to Trading 212 demo mode.

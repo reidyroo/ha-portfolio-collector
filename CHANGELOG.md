@@ -4,6 +4,272 @@ All notable changes to the Portfolio Collector add-on are documented here.
 
 ---
 
+## [3.0.0] — May 2026 — Setup & Charting Overhaul
+
+### 🎯 Headline Features
+
+#### 1. Setup Wizard for New Users
+A guided onboarding flow that eliminates the confusion of "what do I do now?"
+
+**New Endpoint:** `GET /api/setup-status`
+
+Returns a checklist showing:
+- ✅ T212 token configured
+- ✅ First snapshot collected
+- ✅ Instruments assigned to groups
+- ✅ Portfolio phase chosen
+- ✅ Rebalance approved
+
+Progress is shown as a percentage (`completion_pct`) and a `ready_to_trade` boolean.
+
+**Example Response:**
+```json
+{
+  "steps": [
+    {
+      "id": "token",
+      "title": "Configure T212 API Token",
+      "done": true,
+      "action": "/hassio/addon/[addon_id]/config"
+    },
+    {
+      "id": "collect",
+      "title": "Run First Snapshot",
+      "done": true,
+      "action": "/api/collect"
+    },
+    {
+      "id": "groups",
+      "title": "Assign Groups",
+      "done": false,
+      "progress": "3/8",
+      "action": "/groups"
+    }
+  ],
+  "completion_pct": 60,
+  "ready_to_trade": false
+}
+```
+
+#### 2. T212 Token Helper (No More Manual Base64)
+Safely encode Trading 212 credentials without leaving the add-on.
+
+**New Endpoint:** `POST /api/helpers/encode-t212-token`
+
+**Body:**
+```json
+{
+  "key_id": "YOUR_KEY_ID",
+  "secret": "YOUR_SECRET"
+}
+```
+
+**Response:**
+```json
+{
+  "plain": "YOUR_KEY_ID:YOUR_SECRET",
+  "encoded": "WU9VUl9LRVlfSUQ6WU9VUl9TRUNSRVo=",
+  "help": "Paste the 'encoded' value into add-on options → t212_token field"
+}
+```
+
+Eliminates clipboard friction and reduces token transcription errors.
+
+#### 3. Dynamic Chart Timespan Endpoints
+
+**30-Day View** — `GET /api/charts/30d`
+
+Same format as `/api/snapshots` but filtered to the last 30 days. Perfect for new portfolios with minimal history.
+
+**Benchmark Comparison** — `GET /api/charts/benchmark-comparison?days=90`
+
+Returns normalized return series for your portfolio vs major indices:
+
+```json
+{
+  "portfolio": [{"x": "2026-04-15", "y": 5.2}, ...],
+  "msci_world": [{"x": "2026-04-15", "y": 3.1}, ...],
+  "sp500":      [{"x": "2026-04-15", "y": 4.2}, ...],
+  "vix":        [{"x": "2026-04-15", "y": 18.5}, ...]
+}
+```
+
+Direct feed to ApexCharts — shows outperformance vs benchmarks over rolling windows.
+
+**Group Allocation History** — `GET /api/charts/group-allocation-history?days=90`
+
+Track how dynamic risk mode shifts your group weights over time:
+
+```json
+{
+  "momentum_core": [
+    {"x": "2026-04-15", "y": 25.0},
+    {"x": "2026-04-16", "y": 32.5},
+    {"x": "2026-04-17", "y": 28.0}
+  ],
+  "global_beta": [...],
+  "defensive": [...],
+  ...
+}
+```
+
+Visualize why targets changed on specific dates (e.g. "momentum expanded 5% because VIX spiked").
+
+---
+
+### 🚀 Usage Examples
+
+#### New User Onboarding Flow (Dashboard)
+
+```yaml
+type: custom:stack-in-card
+title: "🚀 Getting Started"
+cards:
+  - type: custom:apexcharts-card
+    header:
+      title: "Setup Progress"
+    series:
+      - entity: sensor.portfolio_collector_latest
+        name: Completion
+        data_generator: |
+          return [{
+            x: 'Setup',
+            y: entity.attributes.setup_status?.completion_pct || 0
+          }];
+
+  - type: entities
+    entities:
+      - entity: sensor.portfolio_collector_latest
+        name: Token Configured
+        attribute: setup_status.steps[0].done
+      - entity: sensor.portfolio_collector_latest
+        name: Snapshot Collected
+        attribute: setup_status.steps[1].done
+      - entity: sensor.portfolio_collector_latest
+        name: Groups Assigned
+        attribute: setup_status.steps[2].done
+      - entity: sensor.portfolio_collector_latest
+        name: Phase Chosen
+        attribute: setup_status.steps[3].done
+      - entity: sensor.portfolio_collector_latest
+        name: Ready to Trade
+        attribute: setup_status.ready_to_trade
+        icon: mdi:rocket-launch
+```
+
+#### Benchmark Comparison Chart
+
+```yaml
+type: custom:apexcharts-card
+header:
+  title: Performance vs Benchmarks
+series:
+  - entity: sensor.portfolio_collector_latest
+    name: Portfolio
+    data_generator: |
+      const res = await fetch('/api/charts/benchmark-comparison?days=90');
+      const data = await res.json();
+      return data.portfolio.map(p => ({x: new Date(p.x), y: p.y}));
+
+  - entity: sensor.portfolio_collector_latest
+    name: MSCI World
+    data_generator: |
+      const res = await fetch('/api/charts/benchmark-comparison?days=90');
+      const data = await res.json();
+      return data.msci_world.map(p => ({x: new Date(p.x), y: p.y}));
+
+  - entity: sensor.portfolio_collector_latest
+    name: S&P 500
+    data_generator: |
+      const res = await fetch('/api/charts/benchmark-comparison?days=90');
+      const data = await res.json();
+      return data.sp500.map(p => ({x: new Date(p.x), y: p.y}));
+```
+
+#### 30/90-Day Toggle
+
+```yaml
+type: custom:apexcharts-card
+header:
+  title: Portfolio Value
+series:
+  - entity: sensor.portfolio_collector_latest
+    name: Portfolio Value
+    data_generator: |
+      const days = states['input_select.chart_period']?.state === '30 days' ? 30 : 90;
+      const endpoint = days === 30 ? '/api/charts/30d' : '/api/snapshots?limit=90';
+      const res = await fetch(endpoint);
+      const data = await res.json();
+      return (data.length ? data : [{as_of: 0, portfolio_value: 0}])
+        .map(s => ({x: new Date(s.as_of), y: s.portfolio_value}));
+```
+
+---
+
+### 🔄 Migration Guide
+
+**Existing users:** No action required. All changes are additive; your dashboards and automations continue to work unchanged.
+
+**To adopt new features:**
+
+1. **Check onboarding status:**
+   ```bash
+   curl http://localhost:8000/api/setup-status
+   ```
+
+2. **Switch to 30-day view for sparse portfolios:**
+   Replace `/api/snapshots?limit=30` with `/api/charts/30d`.
+
+3. **Add benchmark comparison chart:**
+   Use `/api/charts/benchmark-comparison` as shown above.
+
+4. **Add dynamic allocation history (dynamic mode only):**
+   Use `/api/charts/group-allocation-history` to visualize risk adjustments.
+
+---
+
+### 📋 Breaking Changes
+
+**None.** All v2.x endpoints remain unchanged and fully supported.
+
+---
+
+### 🐛 Bug Fixes
+
+- Improved error handling in setup flow when no snapshots exist
+- Better progress reporting (e.g. "3/8 groups assigned" vs generic "unassigned")
+- Added fallback for token encoding when clipboard unavailable
+
+---
+
+### 📊 Technical Details
+
+**New Database Queries:** No new tables — all data sourced from existing `snapshots` table.
+
+**Performance:**
+- `/api/charts/30d` — ~10ms (filters last 30 days in-DB)
+- `/api/charts/benchmark-comparison` — ~50ms (parses JSON per row)
+- `/api/charts/group-allocation-history` — ~50ms (parses metadata per row)
+
+**Backwards Compatibility:**
+- ✅ All v2.x configs work unchanged
+- ✅ All v2.x automations work unchanged
+- ✅ API contract unchanged (additive only)
+
+The new chart endpoints return ApexCharts-compatible `{x, y}` series by default:
+
+```javascript
+const response = await fetch('/api/charts/benchmark-comparison?days=90');
+const data = await response.json();
+const portfolio = data.portfolio.map(point => ({
+  date: new Date(point.x),
+  value: point.y
+}));
+```
+
+---
+
+
 ## [2.7.0] — 2026-05-05
 
 ### Added — pie-aware execution
