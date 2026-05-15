@@ -125,87 +125,118 @@ views:
         name: Chart Period
 
       # ── Portfolio value history ───────────────────────────────────────────
-      - type: custom:apexcharts-card
-        header:
-          show: true
-          title: Portfolio Value
-          show_states: true
-        apex_config:
-          xaxis:
-            tickAmount: 6
-        series:
-          - entity: sensor.portfolio_value
-            name: Portfolio (GBP)
-            color: "#00E676"
-            stroke_width: 3
-            data_generator: |
-              const period = states['input_select.portfolio_chart_period']?.state;
-              const endpoint = period === '30 days' ? '/api/charts/30d' : '/api/snapshots?limit=90';
-              const res = await fetch(endpoint);
-              const data = await res.json();
-              return (Array.isArray(data) ? data : [])
-                .map(s => [new Date(s.as_of).getTime(), parseFloat(s.portfolio_value) || 0]);
+      - type: conditional
+        conditions:
+          - entity: input_select.portfolio_chart_period
+            state: "30 days"
+        card:
+          type: custom:apexcharts-card
+          header:
+            show: true
+            title: Portfolio Value (30d)
+            show_states: true
+          graph_span: 30d
+          apex_config:
+            xaxis:
+              tickAmount: 6
+          series:
+            - entity: sensor.portfolio_value
+              name: Portfolio (GBP)
+              color: "#00E676"
+              stroke_width: 3
+
+      - type: conditional
+        conditions:
+          - entity: input_select.portfolio_chart_period
+            state: "90 days"
+        card:
+          type: custom:apexcharts-card
+          header:
+            show: true
+            title: Portfolio Value (90d)
+            show_states: true
+          graph_span: 90d
+          apex_config:
+            xaxis:
+              tickAmount: 6
+          series:
+            - entity: sensor.portfolio_value
+              name: Portfolio (GBP)
+              color: "#00E676"
+              stroke_width: 3
 
       # ── Return history (portfolio vs benchmarks) ──────────────────────────
-      - type: custom:apexcharts-card
-        header:
-          show: true
-          title: Return History (%)
-          show_states: true
-        apex_config:
-          xaxis:
-            tickAmount: 6
-        series:
-          - entity: sensor.portfolio_return
-            name: Portfolio
-            color: "#00E676"
-            stroke_width: 3
-            data_generator: |
-              const period = states['input_select.portfolio_chart_period']?.state;
-              const days = period === '30 days' ? 30 : 90;
-              const res = await fetch(`/api/charts/benchmark-comparison?days=${days}`);
-              const data = await res.json();
-              return (data.portfolio || []).map(p => [new Date(p.x).getTime(), p.y]);
-          - entity: sensor.msci_world_return_1m
-            name: MSCI World
-            color: "#40C4FF"
-            stroke_width: 2
-            data_generator: |
-              const period = states['input_select.portfolio_chart_period']?.state;
-              const days = period === '30 days' ? 30 : 90;
-              const res = await fetch(`/api/charts/benchmark-comparison?days=${days}`);
-              const data = await res.json();
-              return (data.msci_world || []).map(p => [new Date(p.x).getTime(), p.y]);
-          - entity: sensor.sp500_return_1m
-            name: S&P 500
-            color: "#FFB300"
-            stroke_width: 2
-            data_generator: |
-              const period = states['input_select.portfolio_chart_period']?.state;
-              const days = period === '30 days' ? 30 : 90;
-              const res = await fetch(`/api/charts/benchmark-comparison?days=${days}`);
-              const data = await res.json();
-              return (data.sp500 || []).map(p => [new Date(p.x).getTime(), p.y]);
-          - entity: sensor.ftse100_return_1m
-            name: FTSE 100
-            color: "#E040FB"
-            stroke_width: 2
-            data_generator: |
-              const period = states['input_select.portfolio_chart_period']?.state;
-              const days = period === '30 days' ? 30 : 90;
-              const res = await fetch(`/api/charts/benchmark-comparison?days=${days}`);
-              const data = await res.json();
-              return (data.ftse100 || []).map(p => [new Date(p.x).getTime(), p.y]);
-          - entity: sensor.dow_return_1m
-            name: DOW
-            color: "#FF5252"
-            stroke_width: 2
-            data_generator: |
-              const period = states['input_select.portfolio_chart_period']?.state;
-              const days = period === '30 days' ? 30 : 90;
-              const res = await fetch(`/api/charts/benchmark-comparison?days=${days}`);
-              const data = await res.json();
-              return (data.dow || []).map(p => [new Date(p.x).getTime(), p.y]);
+      - type: conditional
+        conditions:
+          - entity: input_select.portfolio_chart_period
+            state: "30 days"
+        card:
+          type: custom:apexcharts-card
+          header:
+            show: true
+            title: Return History (30d) (%)
+            show_states: true
+          graph_span: 30d
+          apex_config:
+            xaxis:
+              tickAmount: 6
+          series:
+            - entity: sensor.portfolio_return
+              name: Portfolio
+              color: "#00E676"
+              stroke_width: 3
+            - entity: sensor.msci_world_return_1m
+              name: MSCI World
+              color: "#40C4FF"
+              stroke_width: 2
+            - entity: sensor.sp500_return_1m
+              name: S&P 500
+              color: "#FFB300"
+              stroke_width: 2
+            - entity: sensor.ftse100_return_1m
+              name: FTSE 100
+              color: "#E040FB"
+              stroke_width: 2
+            - entity: sensor.dow_return_1m
+              name: DOW
+              color: "#FF5252"
+              stroke_width: 2
+
+      - type: conditional
+        conditions:
+          - entity: input_select.portfolio_chart_period
+            state: "90 days"
+        card:
+          type: custom:apexcharts-card
+          header:
+            show: true
+            title: Return History (90d) (%)
+            show_states: true
+          graph_span: 90d
+          apex_config:
+            xaxis:
+              tickAmount: 6
+          series:
+            - entity: sensor.portfolio_return
+              name: Portfolio
+              color: "#00E676"
+              stroke_width: 3
+            - entity: sensor.msci_world_return_1m
+              name: MSCI World
+              color: "#40C4FF"
+              stroke_width: 2
+            - entity: sensor.sp500_return_1m
+              name: S&P 500
+              color: "#FFB300"
+              stroke_width: 2
+            - entity: sensor.ftse100_return_1m
+              name: FTSE 100
+              color: "#E040FB"
+              stroke_width: 2
+            - entity: sensor.dow_return_1m
+              name: DOW
+              color: "#FF5252"
+              stroke_width: 2
 
 
   # ═══════════════════════════════
@@ -485,41 +516,97 @@ views:
     type: masonry
     cards:
 
-      - type: custom:apexcharts-card
-        header:
-          show: true
-          title: Alpha History (%)
-          show_states: true
-        graph_span: 90d
-        apex_config:
-          xaxis:
-            tickAmount: 6
-        series:
-          - entity: sensor.portfolio_alpha_sp500
-            name: vs S&P 500
-            color: "#FFB300"
-            stroke_width: 3
-          - entity: sensor.portfolio_alpha_msci
-            name: vs MSCI World
-            color: "#40C4FF"
-            stroke_width: 3
+      - type: conditional
+        conditions:
+          - entity: input_select.portfolio_chart_period
+            state: "30 days"
+        card:
+          type: custom:apexcharts-card
+          header:
+            show: true
+            title: Alpha History (30d) (%)
+            show_states: true
+          graph_span: 30d
+          apex_config:
+            xaxis:
+              tickAmount: 6
+          series:
+            - entity: sensor.portfolio_alpha_sp500
+              name: vs S&P 500
+              color: "#FFB300"
+              stroke_width: 3
+            - entity: sensor.portfolio_alpha_msci
+              name: vs MSCI World
+              color: "#40C4FF"
+              stroke_width: 3
 
-      - type: custom:apexcharts-card
-        header:
-          show: true
-          title: VIX
-          show_states: true
-        graph_span: 90d
-        apex_config:
-          xaxis:
-            tickAmount: 6
-        series:
-          - entity: sensor.vix_level
-            name: VIX
-            color: "#FF1744"
-            stroke_width: 3
-            fill_raw: zero
-            opacity: 0.55
+      - type: conditional
+        conditions:
+          - entity: input_select.portfolio_chart_period
+            state: "90 days"
+        card:
+          type: custom:apexcharts-card
+          header:
+            show: true
+            title: Alpha History (90d) (%)
+            show_states: true
+          graph_span: 90d
+          apex_config:
+            xaxis:
+              tickAmount: 6
+          series:
+            - entity: sensor.portfolio_alpha_sp500
+              name: vs S&P 500
+              color: "#FFB300"
+              stroke_width: 3
+            - entity: sensor.portfolio_alpha_msci
+              name: vs MSCI World
+              color: "#40C4FF"
+              stroke_width: 3
+
+      - type: conditional
+        conditions:
+          - entity: input_select.portfolio_chart_period
+            state: "30 days"
+        card:
+          type: custom:apexcharts-card
+          header:
+            show: true
+            title: VIX (30d)
+            show_states: true
+          graph_span: 30d
+          apex_config:
+            xaxis:
+              tickAmount: 6
+          series:
+            - entity: sensor.vix_level
+              name: VIX
+              color: "#FF1744"
+              stroke_width: 3
+              fill_raw: zero
+              opacity: 0.55
+
+      - type: conditional
+        conditions:
+          - entity: input_select.portfolio_chart_period
+            state: "90 days"
+        card:
+          type: custom:apexcharts-card
+          header:
+            show: true
+            title: VIX (90d)
+            show_states: true
+          graph_span: 90d
+          apex_config:
+            xaxis:
+              tickAmount: 6
+          series:
+            - entity: sensor.vix_level
+              name: VIX
+              color: "#FF1744"
+              stroke_width: 3
+              fill_raw: zero
+              opacity: 0.55
 
       - type: glance
         title: Returns Since Purchase (%)
