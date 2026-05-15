@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Portfolio Collector — Home Assistant Add-on v3.0.1
+Portfolio Collector — Home Assistant Add-on v3.0.2
 ===================================================
 Monitors a Trading 212 portfolio, computing drift from target weights,
 scoring momentum, benchmarking against major indices, and suggesting
 rebalance trades for manual approval in Home Assistant.
 
-v3.0.1 Release
+v3.0.2 Release
 ──────────────
 NEW FEATURES:
   • Setup wizard endpoint (/api/setup-status) — guides new users through
@@ -238,7 +238,7 @@ _T212_EXCHANGE_MAP: list[tuple[str, str]] = [
     ("_US_EQ",   ""),
 ]
 
-app = FastAPI(title="Portfolio Collector", version="3.0.1")
+app = FastAPI(title="Portfolio Collector", version="3.0.2")
 
 
 # ── Ticker utilities ──────────────────────────────────────────────────────────
@@ -2126,7 +2126,7 @@ def compute_snapshot() -> dict:
 
     return {
         "as_of":                as_of,
-    "collector_version":    "3.0.1",
+    "collector_version":    "3.0.2",
         "weight_mode":          cfg.get("weight_mode", "stored"),
         "portfolio_phase":      cfg.get("portfolio_phase", "Momentum-Chill"),
         "risk_score":           int(risk_score),
@@ -2499,7 +2499,7 @@ def health():
     return {
         "status":           "ok",
         "utc":              datetime.now(timezone.utc).isoformat(),
-    "version":          "3.0.1",
+    "version":          "3.0.2",
         "t212_base":        opts.get("t212_base", "https://demo.trading212.com"),
         "demo_mode":        "demo" in opts.get("t212_base", "demo"),
         "phase":            opts.get("portfolio_phase", "Momentum-Max"),
@@ -3626,6 +3626,8 @@ def benchmark_comparison(days: int = 90):
         "portfolio": [],
         "msci_world": [],
         "sp500": [],
+        "ftse100": [],
+        "dow": [],
         "vix": [],
     }
 
@@ -3645,6 +3647,16 @@ def benchmark_comparison(days: int = 90):
                 series["sp500"].append({
                     "x": row["as_of"][:10],
                     "y": bm["sp500"].get("return_since_purchase", 0)
+                })
+            if "ftse_100" in bm:
+                series["ftse100"].append({
+                    "x": row["as_of"][:10],
+                    "y": bm["ftse_100"].get("return_since_purchase", 0)
+                })
+            if "dow" in bm:
+                series["dow"].append({
+                    "x": row["as_of"][:10],
+                    "y": bm["dow"].get("return_since_purchase", 0)
                 })
             if "vix" in bm:
                 series["vix"].append({
@@ -3691,7 +3703,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     # Always advertise the running collector version so HA sensors / dashboards
     # can confirm the add-on actually upgraded after a Supervisor update.
-    d["collector_version"] = "3.0.1"
+    d["collector_version"] = "3.0.2"
     for f in ["positions_json", "benchmarks_json", "drift_json", "momentum_json", "suggested_actions"]:
         key = f.replace("_json", "")
         d[key] = json.loads(d.pop(f) or ("[]" if f == "suggested_actions" else "{}"))
@@ -3733,7 +3745,7 @@ if __name__ == "__main__":
     # and ensures the /groups page works behind the ingress proxy.
     ingress_path = os.getenv("INGRESS_PATH", "")
     log.info(
-    f"Portfolio Collector v3.0.1 — phase={cfg['portfolio_phase']} — "
+    f"Portfolio Collector v3.0.2 — phase={cfg['portfolio_phase']} — "
         f"weight_mode={cfg['weight_mode']} — "
         f"DB: {DB_PATH} — T212: {cfg['t212_base']} — ingress={ingress_path or 'none'}"
     )
