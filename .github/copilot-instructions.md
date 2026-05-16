@@ -1,32 +1,32 @@
 # Copilot instructions for `ha-portfolio-collector`
 
-- This repo is a Home Assistant add-on, not a standalone web service. The core service lives in `portfolio_collector/collector.py` and exposes a FastAPI HTTP API on port `8000`. The add-on is designed to run within HA's Supervisor environment and integrate closely with HA entities, automations, and Lovelace dashboards.
-- The add-on container is defined in `portfolio_collector/Dockerfile`; runtime config is loaded from `portfolio_collector/run.sh` and `/data/options.json`, while state is persisted in SQLite at `/data/portfolio.db`.
-- `portfolio_collector/config.yaml` is the add-on manifest. It uses `host_network: true` so HA can call `http://localhost:8000` directly, and it defines the add-on option schema used by HA.
-- Home Assistant integration is implemented via `packages/portfolio.yaml` and `lovelace/dashboard.yaml`:
-  - `packages/portfolio.yaml` creates REST sensors from `/api/latest-snapshot`, rest_commands that call `/api/collect`, `/api/approve/latest`, `/api/groups/{ticker}`, etc., and automations for daily collection and approval flows.
-  - `lovelace/dashboard.yaml` renders the dashboard from HA entities and sensor attributes such as `collector_version`, `effective_risk`, `cooldown_override_reason`, `positions`, and `group_summary`.
-- Keep the add-on API contract stable. The HA package/dashboard depend on specific JSON fields and endpoints like `/api/health`, `/api/latest-snapshot`, `/api/approve/latest`, `/api/set-phase`, `/api/set-risk-score`, `/api/notch-up`, and `/api/groups/{ticker}`.
-  If T212 reports the account is inside an auto-invest pie, direct instrument-level orders are blocked. The collector detects pies via `/api/v0/equity/pies` and automatically updates the pie's `instrumentShares` during approval execution unless `force_direct_orders_when_pie` is enabled.
-- Important project-specific patterns:
-  - Group assignment uses `input_select.portfolio_assign_instrument` options formatted as `SYMBOL (TICKER)` and `rest_command.assign_instrument_group` extracts the ticker by parsing that string.
-  - `approve_and_execute_rebalance` uses `latest` in the URL to avoid stale HA sensor cache issues.
-  - `packages/portfolio.yaml` binds HA automations to local add-on REST endpoints; changes in the add-on usually require syncing package/dashboard YAML too.
-- **v3.0.0 New Features (May 2026):**
-  - `/api/setup-status` — onboarding checklist for new users (completion %, step-by-step guidance)
-  - `/api/helpers/encode-t212-token` — safely encode credentials without manual Base64
-  - `/api/charts/30d` — last 30 days (sparse-portfolio friendly)
-  - `/api/charts/benchmark-comparison` — portfolio vs MSCI/S&P500/VIX returns
-  - `/api/charts/group-allocation-history` — dynamic risk adjustment tracking
-- Development workflow:
-  - Rebuild the add-on via HA Supervisor: `ha addons rebuild <addon_id>` and `ha addons restart <addon_id>`.
-  - Verify the running add-on with `curl -s http://localhost:8000/api/health`.
-  - Sync HA YAML assets with `sync_portfolio_files.sh` when `packages/portfolio.yaml` or `lovelace/dashboard.yaml` change.
-  - There is no dedicated test suite in this repo; validation is primarily through HA integration and the add-on HTTP API.
-  - **Version bumping (required for HA add-on refresh to pick up updates):**
-    - HA checks the version field in `/config.yaml` (the add-on manifest in the repo root) and `/portfolio_collector/config.yaml` (the internal config schema)
-    - Both **must** be bumped together to the same version number for updates to propagate
-    - Also update the collector module docstring at the top of `portfolio_collector/collector.py` (e.g., `v3.0.0`)
-    - Commit and push to GitHub — HA's add-on marketplace will detect the new version within minutes
-    - **For major version bumps (e.g. 2.x → 3.0.0):** create a `RELEASE_NOTES.md` documenting new features, breaking changes (if any), and migration guidance
-- Note: `t212_token` must be a Base64 encoding of `KEY_ID:SECRET` and is loaded from the HA add-on options file. `t212_base` defaults to Trading 212 demo mode.
+- This repository is a Home Assistant add-on, not a standalone web app. The add-on service is implemented in `portfolio_collector/collector.py` as a single-file FastAPI app, built from `portfolio_collector/Dockerfile`, and started by `portfolio_collector/run.sh`.
+- Runtime configuration is read from HA add-on options at `/data/options.json` and persisted state lives in SQLite at `/data/portfolio.db`.
+- The HA add-on manifest is `config.yaml` at repo root; `portfolio_collector/config.yaml` also exists as the internal schema/version file and must be kept aligned for version bumps.
+- The add-on uses `host_network: true`, so HA Core interacts with it using `http://localhost:8000`. `collector.py` also supports HA ingress when `INGRESS_PATH` is present.
+- Home Assistant integration is centered on two repository assets:
+  - `packages/portfolio.yaml` — REST sensors polling `/api/latest-snapshot`, `rest_command` calls to `/api/collect`, `/api/approve/latest`, `/api/groups/{ticker}`, `/api/set-risk-score`, `/api/notch-up`, etc., and automations for daily snapshot/approval flows.
+  - `lovelace/dashboard.yaml` — dashboard views built from HA entities, `input_select` helpers, and `custom:apexcharts-card` charts.
+  - `packages/portfolio.yaml` also defines `input_select.portfolio_assign_instrument`, `input_select.portfolio_assign_group`, and the `portfolio_refresh_instrument_dropdown` automation that repopulates the instrument dropdown from the latest snapshot.
+  - The dashboard relies on snapshot-level sensor attributes such as `rebalance_needed`, `rebalance_reason`, `approved`, `drawdown_pct`, `dynamic_group_allocations`, `pie_detected`, and `portfolio_return_pct`.
+- Changes to add-on API behavior usually require updating both `packages/portfolio.yaml` and `lovelace/dashboard.yaml`; sync them with `sync_portfolio_files.sh` and `ha core check`.
+- Key endpoints and JSON fields to preserve:
+  - `/api/health`, `/api/latest-snapshot`, `/api/collect`, `/api/approve/latest`, `/api/set-phase`, `/api/set-risk-score`, `/api/notch-up`, `/api/groups/{ticker}`, `/api/setup-status`, `/api/helpers/encode-t212-token`, `/api/charts/30d`, `/api/charts/benchmark-comparison`, `/api/charts/group-allocation-history`
+  - snapshot payload attributes consumed by HA: `collector_version`, `positions`, `group_summary`, `drift_rel`, `effective_risk`, `cooldown_override_reason`, `approved`, `rebalance_needed`.
+- Project-specific HA patterns:
+  - `input_select.portfolio_assign_instrument` holds values like `SYMBOL (TICKER)` and the package extracts the canonical ticker with `split('(')[1].split(')')[0] | urlencode`.
+  - dashboard automation uses `latest` in the approval URL to avoid stale HA sensor cache issues.
+  - the YAML package/dashboard are intentionally local-loopback only; no external URL or LAN rewrite is required for the dashboard.
+- Trading 212 auto-invest pies are a special case: the collector detects pie accounts and will update pie `instrumentShares` instead of placing direct instrument orders unless `force_direct_orders_when_pie` is explicitly enabled.
+- Version bump workflow:
+  - update `version` in `config.yaml` and `portfolio_collector/config.yaml`
+  - update `portfolio_collector/collector.py` version references in the top docstring, the `collector_version` injection, and the startup log
+  - verify all version occurrences match before committing; `CLAUDE.md` lists the source files.
+- There is no dedicated automated test suite in this repository. Use HA Supervisor rebuild/restart flows, `curl -s http://localhost:8000/api/health`, and `sync_portfolio_files.sh` for validation.
+- Debugging and validation commands:
+  - `curl -s http://localhost:8000/api/health` to confirm the add-on is running and to verify the reported version.
+  - `curl -X POST http://localhost:8000/api/collect` to force a snapshot and refresh the HA REST sensors.
+  - `curl -s http://localhost:8000/api/latest-snapshot | python3 -c ...` to inspect the live snapshot payload and confirm entity attribute keys.
+  - Use `sync_portfolio_files.sh` on HA Core to refresh `packages/portfolio.yaml` and `lovelace/dashboard.yaml` from this repo, then run `ha core check`.
+  - Rebuild/restart the add-on via Supervisor when code changes are made: `ha addons rebuild <addon_id>` and `ha addons restart <addon_id>`.
+  - When debugging dashboard behavior, verify the HA package uses `http://localhost:8000` and not an external IP; the dashboard is intended to remain local-loopback only.
