@@ -30,3 +30,8 @@
   - Use `sync_portfolio_files.sh` on HA Core to refresh `packages/portfolio.yaml` and `lovelace/dashboard.yaml` from this repo, then run `ha core check`.
   - Rebuild/restart the add-on via Supervisor when code changes are made: `ha addons rebuild <addon_id>` and `ha addons restart <addon_id>`.
   - When debugging dashboard behavior, verify the HA package uses `http://localhost:8000` and not an external IP; the dashboard is intended to remain local-loopback only.
+- HA entity names and the REST sensor contract:
+  - REST resource `/api/latest-snapshot` drives sensors like `sensor.portfolio_value` (GBP, device_class=monetary), `sensor.portfolio_return` (%), `sensor.portfolio_cash`, `sensor.rebalance_signal`, `sensor.vix_level`, `sensor.portfolio_snapshot` (attributes: `positions`, `momentum`, `drift`, `group_summary`).
+  - Benchmark sensors (`sensor.sp500_return_since_purchase`, `sensor.msci_world_return_1m`, etc.) and template sensors (`sensor.vix_regime`, `sensor.portfolio_alpha_msci`, `sensor.snapshot_age_hours`) derive from the same REST resource.
+  - `rest_command` targets: `trigger_portfolio_collect`, `approve_and_execute_rebalance`, `set_risk_score`, `set_portfolio_phase`, `assign_instrument_group`, `notch_up_cooldown`, `cancel_notch_up`.
+  - Changing snapshot payload structure or renaming REST endpoints requires updating both the sensor definitions in `packages/portfolio.yaml` AND any dashboard cards or template sensors that consume them.
